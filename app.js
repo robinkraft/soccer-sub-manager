@@ -796,6 +796,13 @@ function goalLabel(g, players){
   const min=g.seconds==null?'':" "+Math.floor(g.seconds/60)+"'";
   return name+min;
 }
+// Goals shown to the user. Unknown-scorer goals on the THEM side are
+// never listed: the other team's scorers were never recorded, and
+// there is nobody on our roster to assign one to. US unknown goals
+// ARE listed ("Unknown scorer", assignable via Edit goals).
+// Display-only: the score is stored separately (our_score /
+// their_score) and still shows the full score.
+function displayGoals(goals){ return (goals||[]).filter(g=>!(g.player==null && (g.side||'us')==='them')); }
 
 /* ---------- Lineup generation ---------- */
 function autoLineup(favourLow){
@@ -1042,7 +1049,7 @@ function historyHtml(){
       + '<div class="muted">' + (played ? played + ' &middot; ' : '') + 'US ' + h.ourScore + ' \u2013 ' + h.theirScore + ' THEM</div></div>'
       + '<button class="small" data-details="' + hi + '">' + (open ? 'Hide' : 'Details') + '</button></div>';
     if (!open) return '<div class="card">' + head + '</div>';
-    const goalLines = (h.goals || []).map(g=>goalLabel(g, h.players)).join(', ') || 'No goals recorded';
+    const goalLines = displayGoals(h.goals).map(g=>goalLabel(g, h.players)).join(', ') || 'No goals recorded';
     const rows = h.players.map(p => {
       // Per-player row: counted total (whole minutes) on the right,
       // per-position breakdown below the name — goalie minutes included
@@ -1075,7 +1082,7 @@ function isoDateOf(h){
 // Player is a roster index into the game's own player list, so the name
 // stays right even if the roster has changed since; -1 is an own goal.
 function goalRowsForCsv(h){
-  return (h.goals||[]).map(g=>[
+  return displayGoals(h.goals).map(g=>[
     g.player===-1?'Own goal':(g.player==null?'Unknown scorer':(g.player_name||((h.players||[])[g.player]?h.players[g.player].name:'?'))),
     g.seconds==null?'':Math.floor(g.seconds/60),
     g.side||'us']);
@@ -1260,8 +1267,11 @@ function openShortChooser(){
     +'<div class="picker-grid">'+opts+'</div><div class="pin-bottom"><button class="ghost" data-close>Cancel</button></div>');
 }
 function openEditGoalsLive(){
-  if(!S.goals.length){ openModal('<h2>Edit goals</h2><p>No goals recorded yet in this game.</p><div class="pin-bottom"><button class="ghost" data-close>Close</button></div>'); return; }
-  const rows=S.goals.map((g,gi)=>'<div class="mrow"><span class="name">'+esc(goalLabel(g))+' ('+(g.side==='us'?'US':'THEM')+')</span>'
+  if(!displayGoals(S.goals).length){ openModal('<h2>Edit goals</h2><p>No goals recorded yet in this game.</p><div class="pin-bottom"><button class="ghost" data-close>Close</button></div>'); return; }
+  // THEM unknown goals render as '' (not a row): there is nobody on
+  // our roster to assign an opponent goal to. gi stays the index into
+  // S.goals, so the row buttons still address the right goal.
+  const rows=S.goals.map((g,gi)=>(g.player==null && (g.side||'us')==='them')?'':'<div class="mrow"><span class="name">'+esc(goalLabel(g))+' ('+(g.side==='us'?'US':'THEM')+')</span>'
     +'<span class="nums">'
     +(g.player==null?'<button class="small" data-assign-live="'+gi+'">Assign…</button> ':'')
     +'<button class="small" data-goal-minus="'+gi+'">−1′</button> <button class="small" data-goal-plus="'+gi+'">+1′</button> '
@@ -1405,7 +1415,7 @@ function liveHtml(){
   } else if(S.liveTab==='minutes'){
     body='<h2>Minutes — actual &amp; projected</h2><p class="muted">Fair share: '+fmtMin(fairShareSec())+' min &middot; threshold \u00b1'+S.settings.fairTimeThreshold+' min &middot; '+(S.settings.countGoalieTime?'goalie time counts':'goalie time excluded from totals')+'.</p>'
       +'<div id="live-minutes-inline">'+minutesRowsHtml()+'</div>'
-      +'<h3>Goals</h3>'+(S.goals.length?S.goals.map(g=>'<p>'+esc(goalLabel(g))+' ('+(g.side==='us'?'US':'THEM')+')</p>').join(''):'<p class="muted">No goals yet.</p>')
+      +'<h3>Goals</h3>'+(displayGoals(S.goals).length?displayGoals(S.goals).map(g=>'<p>'+esc(goalLabel(g))+' ('+(g.side==='us'?'US':'THEM')+')</p>').join(''):'<p class="muted">No goals yet.</p>')
       +'<div class="row"><button data-edit-goals>Edit goals</button></div>';
   } else if(S.liveTab==='team'){
     body='<h2>Team — player status</h2><p class="muted">Alphabetical. Notes are private.</p>'+teamRowsHtml()
@@ -1457,7 +1467,7 @@ function finishedHtml(){
   return '<section aria-label="Finished game"><h2>Full time — US '+last.ourScore+' – '+last.theirScore+' THEM</h2>'
     +(S.saveNote?'<p class="muted">'+esc(S.saveNote)+'</p>':'')
     +'<div class="field-wrap" style="position:static">'+field+'</div>'
-    +'<p>'+(last.goals.length?'Scorers: '+last.goals.map(g=>goalLabel(g, last.players)).join(', '):'No goals recorded.')+'</p>'
+    +'<p>'+(displayGoals(last.goals).length?'Scorers: '+displayGoals(last.goals).map(g=>goalLabel(g, last.players)).join(', '):'No goals recorded.')+'</p>'
     +'<div class="row"><button class="primary" data-close-history>Close and view history</button><button data-csv-last>Download CSV</button><button data-editgoals-last>Edit goals</button></div>'
     +'<div class="row"><button data-new-game>Start new game</button><button class="danger" data-discard-game>Discard this game</button></div>'
     +'<h3>Minutes</h3>'+last.players.map(p=>'<div class="mrow"><span class="name">'+esc(p.name)+'</span><span class="nums">'+fmtMin(p.seconds)+' min'+(p.gkSeconds?' (GK '+fmtMin(p.gkSeconds)+')':'')+(p.goals?' ⚽ '+p.goals:'')+'</span></div>').join('')
@@ -1809,7 +1819,7 @@ document.addEventListener('click', async (e)=>{
     const h=S.history[+d.editgoals];
     openModal('<h2>Edit goals — past game</h2><p class="muted">Backfill a scorer with an optional minute, or remove one.</p>'
       +'<div class="row"><button data-backfill="'+d.editgoals+'">Add goal…</button></div>'
-      +(h.goals.map((g,gi)=>'<div class="mrow"><span class="name">'+esc(goalLabel(g, h.players))+'</span>'
+      +(h.goals.map((g,gi)=>(g.player==null && (g.side||'us')==='them')?'':'<div class="mrow"><span class="name">'+esc(goalLabel(g, h.players))+'</span>'
         +(g.player==null?'<button class="small" data-assign-hist="'+d.editgoals+':'+gi+'">Assign…</button>':'')
         +'<button class="small danger" data-delhist="'+d.editgoals+':'+gi+'">Remove</button></div>').join('')||'<p class="muted">No goals yet.</p>')
       +'<div class="pin-bottom"><button class="ghost" data-close>Done</button></div>');
