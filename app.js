@@ -96,7 +96,7 @@ function freshState(){
     plannedLineup:null,        // halftime plan
     editingLive:false,         // true while the setup screen is being used as the mid-game Edit lineup editor
     halftimeDone:false,
-    message:'', error:'',
+    error:'',
   };
 }
 /* No browser storage is used for game/history data anywhere in this
@@ -349,8 +349,7 @@ async function saveRosterToBackend() {
    never fires on page load — loading a roster does not write one. */
 async function saveRosterAuto() {
   if (SB.rosterFromLive) return;
-  const ok = await saveRosterToBackend();
-  if (ok) { S.message = 'Roster saved.'; render(); }
+  await saveRosterToBackend();
 }
 function padArr(arr, n, fill) {
   const out = Array.isArray(arr) ? [...arr] : [];
@@ -402,7 +401,7 @@ function internalGameFromRow(row) {
   let date = '';
   try { date = row.game_date ? new Date(row.game_date + 'T12:00:00').toLocaleDateString() : new Date(row.created_at).toLocaleDateString(); } catch (e) { date = row.game_date || ''; }
   return {
-    backendId: row.id, date, teamName: row.team_name,
+    backendId: row.id, date, dateISO: row.game_date || '', teamName: row.team_name,
     ourScore: row.our_score, theirScore: row.their_score,
     playedSeconds: row.elapsed_seconds || 0,
     lineup: (row.starting_lineup || []).map(x => x == null ? null : x),
@@ -574,7 +573,6 @@ function handleRemoteLive(row) {
     if (row.phase === 'halftime') S.screen = 'halftime';
     else if (row.phase === 'finished') { S.screen = 'finished'; }
     else if (S.screen !== 'live') S.screen = 'live';
-    S.message = 'Live update from the driver.';
     render();
   } else if (SB.role === 'driver') {
     // Someone else moved the row past the version we last saw.
@@ -596,7 +594,6 @@ async function startLiveDriver() {
     if (error) throw error;
     SB.liveId = data.id; SB.liveCode = code; SB.liveVersion = 1; SB.role = 'driver'; SB.offline = false;
     subscribeLive();
-    S.message = 'Live game started — game code ' + code + '. The other coach enters this code on setup to join.';
   } catch (e) {
     SB.backendError = 'Live game could not be started — try again.';
   }
@@ -618,7 +615,6 @@ async function joinLiveGame(code) {
     else S.screen = 'live';
     S.liveTab = 'actions';
     subscribeLive();
-    S.message = 'Watching live (view-only) — the driver is driving this game.';
     render();
     return true;
   } catch (e) {
@@ -651,7 +647,6 @@ async function doLiveSync() {
     SB.liveVersion = nextVersion; SB.offline = false;
   } catch (e) {
     SB.offline = true;
-    S.message = 'Offline — changes will sync when signal returns.';
     render();
   }
 }
@@ -669,7 +664,6 @@ async function takeOverLive() {
     if (error) throw error;
     if (!data || !data.length) { S.error = 'Takeover raced another change — try again.'; render(); return; }
     SB.liveVersion = nextVersion; SB.role = 'driver'; SB.offline = false;
-    S.message = 'You are now driving this game.';
     render();
   } catch (e) {
     S.error = 'Takeover failed — try again.';
@@ -716,7 +710,7 @@ function undoLast(){
   S.minutesSec=s.minutesSec; S.gkSec=s.gkSec; S.posSec=s.posSec; S.goals=s.goals; S.queue=s.queue;
   s.rosterPresent.forEach((p,i)=>{S.roster[i].present=p;});
   s.rosterTired.forEach((t,i)=>{S.roster[i].tired=t;});
-  S.swapPair=[]; S.selection=null; S.message='Undid: '+u.label;
+  S.swapPair=[]; S.selection=null;
   render();
 }
 
@@ -977,7 +971,8 @@ function seasonTotalsHtml(){
         + (posLine ? '<div class="muted season-pos">' + posLine + '</div>' : '') + '</div>';
     }).join('');
   return '<div class="row spread" style="align-items:baseline"><h2 style="margin-bottom:2px">Season totals</h2>'
-    + '<button class="season-csv-link" data-season-csv>&darr; Full season CSV</button></div>'
+    + '<span><button class="season-csv-link" data-season-csv>&darr; Full season CSV</button>'
+    + '<button class="season-csv-link" data-all-history-csv>&darr; Export all history</button></span></div>'
     + '<p class="muted" style="margin-top:0">' + S.history.length + ' game' + (S.history.length === 1 ? '' : 's')
     + ' &middot; ' + (S.settings.countGoalieTime ? 'goalie time counts toward totals' : 'totals exclude goalie time (shown in the breakdown)') + '</p>'
     + rows;
@@ -1035,10 +1030,70 @@ function historyHtml(){
       + rows + '</div>';
   }).join('');
 }
+function csvCell(v){ return '"'+String(v).replace(/"/g,'""')+'"'; }
+// ISO date for a history game: stored on the game since the rebuild
+// (finishGame / internalGameFromRow); older games only have the
+// display date, which this app writes as M/D/YYYY.
+function isoDateOf(h){
+  if(h.dateISO) return h.dateISO;
+  const m=String(h.date||'').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  return m?m[3]+'-'+m[1].padStart(2,'0')+'-'+m[2].padStart(2,'0'):String(h.date||'');
+}
+// Goal rows for a history game, for CSV: [scorer, minute-or-blank, side].
+// Player is a roster index into the game's own player list, so the name
+// stays right even if the roster has changed since; -1 is an own goal.
+function goalRowsForCsv(h){
+  return (h.goals||[]).map(g=>[
+    g.player===-1?'Own goal':((h.players||[])[g.player]?h.players[g.player].name:'?'),
+    g.seconds==null?'':Math.floor(g.seconds/60),
+    g.side||'us']);
+}
 function csvForGame(h){
   const head='Player,Present,Actual minutes,GK minutes,Goals,Positions\n';
   const lines=h.players.map(p=>[p.name, p.present?'yes':'no', fmtMin(p.seconds), fmtMin(p.gkSeconds||0), p.goals||0,
     Object.entries(p.posSeconds||{}).map(([k,v])=>k+':'+fmtMin(v)).join('; ')].map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(','));
+  return head+lines.join('\n')+'\n';
+}
+/* Export all history — the complete backup / migration source (one
+   file, every game, ALL data the app has). Three labelled sections;
+   every row carries its game (date + score — two games can share a
+   date, so the date alone never identifies one). The history import
+   script reads this file back and reproduces the games exactly,
+   including starting lineups and goal minutes — no manifest needed. */
+function allHistoryCsv(){
+  const teamLine='Team,'+csvCell(S.teamName)+'\n';
+  const gamesHead='\nGames\nGame date,Our score,Their score,Match minutes,Played seconds,Starting lineup (GK;RB;LB;RM;CM;LM;ST)\n';
+  const gamesRows=S.history.map(h=>{
+    const lineup=(h.lineup||[]).map(i=>i==null?'':((h.players||[])[i]?h.players[i].name:'')).join('; ');
+    return [isoDateOf(h), h.ourScore, h.theirScore, h.matchMinutes||S.settings.matchMinutes||50, h.playedSeconds||0, lineup].map(csvCell).join(',');
+  }).join('\n');
+  const playersHead='\nPlayers\nGame date,Our score,Their score,Player,Present,Actual minutes,GK minutes,Goals,Positions\n';
+  const playerRows=[];
+  S.history.forEach(h=>{
+    (h.players||[]).forEach(p=>{
+      playerRows.push([isoDateOf(h), h.ourScore, h.theirScore, p.name, p.present?'yes':'no',
+        fmtMin(p.seconds), fmtMin(p.gkSeconds||0), p.goals||0,
+        Object.entries(p.posSeconds||{}).map(([k,v])=>k+':'+fmtMin(v)).join('; ')].map(csvCell).join(','));
+    });
+  });
+  const goalsHead='\nGoals\nGame date,Our score,Their score,Scorer,Minute,Side\n';
+  const goalRows=[];
+  S.history.forEach(h=>{
+    goalRowsForCsv(h).forEach(r=>goalRows.push([isoDateOf(h), h.ourScore, h.theirScore, ...r]));
+  });
+  return teamLine+gamesHead+gamesRows+'\n'+playersHead+playerRows.join('\n')+'\n'+goalsHead
+    +goalRows.map(r=>r.map(csvCell).join(',')).join('\n')+(goalRows.length?'\n':'');
+}
+/* Export roster — the roster backup / transfer file: every player
+   with all roster state the app stores (name, availability, tired
+   flag, all seven preferred positions, note). Minutes and goals are
+   game data, not roster data, so they are not in this file. */
+function rosterCsv(){
+  const head='Player,Available,Tired,GK,RB,LB,RM,CM,LM,ST,Note\n';
+  const lines=S.roster.map(r=>[
+    r.name, r.present?'yes':'no', r.tired?'yes':'no',
+    ...POSITIONS.map(p=>r.prefs.includes(p)?'yes':'no'),
+    r.note||''].map(csvCell).join(','));
   return head+lines.join('\n')+'\n';
 }
 function downloadCsv(filename, text){
@@ -1150,7 +1205,6 @@ function openAddPlayerEditor(){
     +'<div class="row" style="margin-top:8px"><button class="primary" data-save-add-player>Save player</button><button class="ghost" data-close>Cancel</button></div>');
 }
 function removePlayer(i){
-  const name=S.roster[i].name;
   // No undo for a structural roster change: undo snapshots are
   // index-based, and removing a player shifts every later index.
   // Clear the stack instead of restoring the wrong players.
@@ -1160,7 +1214,6 @@ function removePlayer(i){
   S.lineup=S.lineup.map(x=>x==null?null:(x===i?null:(x>i?x-1:x)));
   if(S.startingLineup) S.startingLineup=S.startingLineup.map(x=>x==null?null:(x===i?null:(x>i?x-1:x)));
   if(S.plannedLineup) S.plannedLineup=S.plannedLineup.map(x=>x==null?null:(x===i?null:(x>i?x-1:x)));
-  S.message=name+' removed from the roster.';
   closeModal(); render();
   saveRosterAuto();
 }
@@ -1189,10 +1242,15 @@ function render(){
   // behind it, and no clock running.
   if (authGated()) { mainEl.innerHTML = loginHtml(); return; }
   startClock();
-  const msg=S.message?'<div class="notice" role="status">'+esc(S.message)+'</div>':'';
+  // Errors are the only top-of-screen message left: they report a
+  // blocked action or a failed load, which nothing else on screen
+  // shows. Routine confirmations (swap done, subs applied, queued,
+  // saved, …) are gone entirely — the field, bench, queue and tabs
+  // already show what happened, and a banner there pushed the whole
+  // live screen down every time.
   const err=S.error?'<div class="error" role="alert">'+esc(S.error)+'</div>':'';
-  S.message=''; S.error='';
-  let html=msg+err;
+  S.error='';
+  let html=err;
   // Supabase status banners (never block the game).
   if(SB.backendError) html+='<div class="error" role="alert">'+esc(SB.backendError)+'</div>';
   if(SB.offline) html+='<div class="error" role="alert">Offline — changes will sync when signal returns.</div>';
@@ -1251,7 +1309,7 @@ function setupHtml(){
     body='<h2>Attendance &amp; positions</h2><p class="muted">Tap positions to toggle &middot; keep at least one</p>'
       +((rosterSourceLabel()||SB.rosterError)?'<p class="muted">'+esc(rosterSourceLabel())+(SB.rosterError?' '+esc(SB.rosterError):'')+'</p>':'')
       +teamRowsHtml()
-      +'<div class="row"><button data-add-player>Add player</button>'
+      +'<div class="row"><button data-add-player>Add player</button><button data-export-roster>Export roster</button>'
       +(SB.configured && SB.authUser?'<button data-save-roster>Save roster</button>':'')
       +'</div>'
       +'<p class="muted">Notes are private.</p>';
@@ -1285,14 +1343,25 @@ function liveHtml(){
   const tabs=[['actions','Actions'],['minutes','Minutes'],['team','Team'],['positions','Positions']];
   let body='';
   if(S.liveTab==='actions'){
+    // Layout stability: the scoreboard, tabs, field, bench and Apply
+    // never move as actions are taken. The Swap/Cancel buttons live in
+    // a fixed-height slot under the field (empty when no swap is
+    // staged), and the Apply button lives in a fixed-height slot under
+    // the bench (empty when nothing is queued) — so staging or
+    // executing a swap or a sub cannot push the bench or anything else
+    // down. No banner or hint is ever inserted between the field and
+    // the bench: the selected chips already show a staged swap, and
+    // the queue list below Apply already shows a queued sub.
     body='<div class="field-wrap">'+fieldHtml({showMinutes:true})+'</div>'
-      +(S.swapPair.length?'<div class="banner">Swap staged: '+esc(S.roster[S.lineup[S.swapPair[0]]].name)+' \u2194 '+esc(S.roster[S.lineup[S.swapPair[1]]].name)+' — tap Swap to run it now.</div>':'')
-      +(S.selection?'<p class="muted">Selected: '+esc(S.roster[S.selection.player].name)+' — tap '+(S.selection.kind==='out'?'a bench player to bring on, or another field player to stage a swap.':'a field player to replace.')+'</p>':'')
+      +'<div class="swap-slot">'
       +(S.swapPair.length?'<div class="row"><button class="primary" data-do-swap>Swap</button><button class="ghost" data-cancel-swap>Cancel swap</button></div>':'')
+      +'</div>'
       +'<div class="bench-head"><h3>Bench</h3><span class="muted small">'+(S.queue.length?S.queue.length+' queued &middot; tap field or bench to add another':'tap a player to start a sub')+'</span></div>'+benchHtml()
+      +'<div class="apply-slot">'
+      +(S.queue.length?'<button class="apply" data-apply>Apply '+S.queue.length+' now</button>':'')
+      +'</div>'
       +(S.queue.length
-        ? '<div class="row" style="margin-top:10px"><button class="apply" data-apply>Apply '+S.queue.length+' now</button></div>'
-          +'<h3>Next change</h3><p class="muted">'+S.queue.length+' ready &middot; <button class="small ghost" data-clear-queue>Clear</button></p>'
+        ? '<h3>Next change</h3><p class="muted">'+S.queue.length+' ready &middot; <button class="small ghost" data-clear-queue>Clear</button></p>'
           +S.queue.map((q,qi)=>'<div class="queue-item"><span class="q-num">'+(qi+1)+'</span><span>\u2193 '+esc(S.roster[q.out].name)+' ('+POSITIONS[q.pos]+')</span><span class="arrow">\u2192</span><span>\u2191 '+esc(S.roster[q.in].name)+'</span><button class="small" data-unqueue="'+qi+'">Remove</button></div>').join('')
           +'<div class="row"><button data-suggest>Suggest rotation</button></div>'
         :'<p class="muted">No substitutions queued. Tap a field player, then a bench player — or a bench player first, then a field player.</p><div class="row"><button data-suggest>Suggest rotation</button></div>')
@@ -1352,6 +1421,7 @@ function finishedHtml(){
   if(!last) return '<p>No finished game yet.</p>';
   const keep=S.lineup; S.lineup=last.lineup; const field=fieldHtml({readonly:true}); S.lineup=keep;
   return '<section aria-label="Finished game"><h2>Full time — US '+last.ourScore+' – '+last.theirScore+' THEM</h2>'
+    +(S.saveNote?'<p class="muted">'+esc(S.saveNote)+'</p>':'')
     +'<div class="field-wrap" style="position:static">'+field+'</div>'
     +'<p>'+(last.goals.length?'Scorers: '+last.goals.map(goalLabel).join(', '):'No goals recorded.')+'</p>'
     +'<div class="row"><button class="primary" data-close-history>Close and view history</button><button data-csv-last>Download CSV</button><button data-editgoals-last>Edit goals</button></div>'
@@ -1367,7 +1437,6 @@ function suggestRotation(){
   const n=Math.min(S.settings.subsPerRotation, outPool.length, lowBench.length);
   S.queue=[];
   for(let i=0;i<n;i++) S.queue.push({out:outPool[i].player, in:lowBench[i], pos:outPool[i].pos});
-  S.message=S.queue.length?'Suggested rotation queued — review, then Apply.':'No rotation to suggest right now.';
   render();
 }
 function applyQueue(){
@@ -1375,7 +1444,6 @@ function applyQueue(){
   pushUndo('apply subs');
   for(const q of S.queue){ S.lineup[q.pos]=q.in; }
   S.queue=[]; S.selection=null;
-  S.message='Substitutions applied at '+fmtClock(S.elapsed)+'.';
   render();
 }
 function doSwap(){
@@ -1384,7 +1452,6 @@ function doSwap(){
   const [a,b]=S.swapPair;
   const tmp=S.lineup[a]; S.lineup[a]=S.lineup[b]; S.lineup[b]=tmp;
   S.swapPair=[]; S.selection=null;
-  S.message='Swap done — Undo is available on the scoreboard.';
   render();
 }
 function recordGoal(side, player){
@@ -1400,9 +1467,9 @@ async function finishGame(){
     name:r.name, present:r.present, seconds:totalSec(i), gkSeconds:S.gkSec[i],
     goals:goalsFor(i), posSeconds:S.posSec[i],
   }));
-  const game={date:new Date().toLocaleDateString(), teamName:S.teamName,
+  const game={date:new Date().toLocaleDateString(), dateISO:new Date().toISOString().slice(0,10), teamName:S.teamName,
     ourScore:S.ourScore, theirScore:S.theirScore, lineup:[...(S.startingLineup||S.lineup)],
-    players, goals:[...S.goals], playedSeconds:S.elapsed};
+    players, goals:[...S.goals], playedSeconds:S.elapsed, matchMinutes:S.settings.matchMinutes};
   S.history.push(game);
   // "Use last game's lineup" loads the previous completed game's
   // STARTING lineup, not the end-of-game lineup.
@@ -1412,8 +1479,8 @@ async function finishGame(){
   // Durable record first: history insert, then mark the live row finished.
   await saveHistoryGame(game);
   await finishLiveGame();
-  if(game.backendId) S.message='Game saved to history.';
-  else if(SB.configured) S.message='Game saved on this device only — download the CSV as a backup.';
+  if(game.backendId) S.saveNote='Game saved to history.';
+  else if(SB.configured) S.saveNote='Game saved on this device only — download the CSV as a backup.';
   render();
 }
 function startNewGame(){
@@ -1454,13 +1521,12 @@ function startSecondHalf(){
     S.plannedLineup=null;
   }
   S.halftimeDone=true; S.screen='live'; S.liveTab='actions'; S.running=true;
-  S.message='Second half started.';
   render();
 }
 
 /* ---------- Events (delegation) ---------- */
 document.addEventListener('click', async (e)=>{
-  const t=e.target.closest('[data-spot],[data-bench],[data-tab],[data-pick],[data-scorer],[data-step],[data-close],[data-clear-spot],[data-save-note],[data-pref],[data-remove-pos],[data-goal-minus],[data-goal-plus],[data-goal-del],[data-tired],[data-note],[data-prefs],[data-rename],[data-save-rename],[data-add-player],[data-save-add-player],[data-remove-player],[data-save-roster],[data-attend],[data-unqueue],[data-csv],[data-editgoals],[data-auto],[data-refresh],[data-review],[data-back-setup],[data-start-game],[data-pause],[data-plus2],[data-halftime],[data-end],[data-undo],[data-apply],[data-clear-queue],[data-suggest],[data-edit-lineup],[data-play-short],[data-full-strength],[data-edit-goals],[data-do-swap],[data-cancel-swap],[data-plan-refresh],[data-plan-use],[data-start-second],[data-snap-clock],[data-back-live],[data-takeover-live],[data-conflict-reload],[data-conflict-keep],[data-new-game],[data-csv-last],[data-editgoals-last],[data-confirm-yes],[data-last-lineup],[data-use-preferred],[data-save-preferred],[data-score],[data-signin],[data-signout],[data-close-history],[data-discard-game],[data-starting-lineup],[data-leaving],[data-arrived],[data-setup-tab],[data-details],[data-season-csv],[data-clear-lineup],[data-clear-preferred],[data-manage-preferred],[data-more],[data-pref-inline],[data-halftime-prefs],[data-join-live]');
+  const t=e.target.closest('[data-spot],[data-bench],[data-tab],[data-pick],[data-scorer],[data-step],[data-close],[data-clear-spot],[data-save-note],[data-pref],[data-remove-pos],[data-goal-minus],[data-goal-plus],[data-goal-del],[data-tired],[data-note],[data-prefs],[data-rename],[data-save-rename],[data-add-player],[data-save-add-player],[data-remove-player],[data-save-roster],[data-attend],[data-unqueue],[data-csv],[data-editgoals],[data-auto],[data-refresh],[data-review],[data-back-setup],[data-start-game],[data-pause],[data-plus2],[data-halftime],[data-end],[data-undo],[data-apply],[data-clear-queue],[data-suggest],[data-edit-lineup],[data-play-short],[data-full-strength],[data-edit-goals],[data-do-swap],[data-cancel-swap],[data-plan-refresh],[data-plan-use],[data-start-second],[data-snap-clock],[data-back-live],[data-takeover-live],[data-conflict-reload],[data-conflict-keep],[data-new-game],[data-csv-last],[data-editgoals-last],[data-confirm-yes],[data-last-lineup],[data-use-preferred],[data-save-preferred],[data-score],[data-signin],[data-signout],[data-close-history],[data-discard-game],[data-starting-lineup],[data-leaving],[data-arrived],[data-setup-tab],[data-details],[data-season-csv],[data-all-history-csv],[data-export-roster],[data-clear-lineup],[data-clear-preferred],[data-manage-preferred],[data-more],[data-pref-inline],[data-halftime-prefs],[data-join-live]');
   if(!t) return;
   const d=t.dataset;
 
@@ -1479,10 +1545,10 @@ document.addEventListener('click', async (e)=>{
   // View-only phone: block every edit action. Allowed: switching tabs,
   // closing modals, copying links, viewing CSVs, and taking over.
   if(SB.role==='viewer' && SB.liveId){
-    const allowed=new Set(['tab','setupTab','close','takeoverLive','joinLive','confirmYes','csv','csvLast','seasonCsv','details','halftimePrefs','backSetup','conflictReload','conflictKeep']);
+    const allowed=new Set(['tab','setupTab','close','takeoverLive','joinLive','confirmYes','csv','csvLast','seasonCsv','allHistoryCsv','exportRoster','details','halftimePrefs','backSetup','conflictReload','conflictKeep']);
     const keys=Object.keys(d);
     if(keys.length && !keys.some(k=>allowed.has(k))){
-      S.message='View-only — the driver is driving this game. Take over to make changes.';
+      S.error='View-only — the driver is driving this game. Take over to make changes.';
       render(); return;
     }
   }
@@ -1493,14 +1559,13 @@ document.addEventListener('click', async (e)=>{
   if(d.conflictReload!==undefined){
     const row=SB.conflict?SB.conflict.row:null;
     SB.conflict=null;
-    if(row){ SB.liveVersion=row.version; applyLiveState(row.state); S.message='Loaded the other coach’s version.'; }
+    if(row){ SB.liveVersion=row.version; applyLiveState(row.state); }
     render(); return;
   }
   if(d.conflictKeep!==undefined){
     const row=SB.conflict?SB.conflict.row:null;
     SB.conflict=null;
     if(row) SB.liveVersion=row.version; // next write is version+1 over theirs
-    S.message='Keeping your version — it will sync on the next change.';
     render(); return; // render() schedules the debounced driver sync
   }
 
@@ -1520,7 +1585,7 @@ document.addEventListener('click', async (e)=>{
     if(S.screen==='halftime'){ openPlayerPicker(pos); return; }
     if(S.screen==='setup'){ openPlayerPicker(pos); return; }
     if(S.screen==='live'){
-      if(S.removedPositions.includes(pos)){ pushUndo('restore position'); S.removedPositions=S.removedPositions.filter(x=>x!==pos); S.shortMode=S.removedPositions.length>0; S.message=POSITIONS[pos]+' restored — tap the spot to fill it.'; render(); return; }
+      if(S.removedPositions.includes(pos)){ pushUndo('restore position'); S.removedPositions=S.removedPositions.filter(x=>x!==pos); S.shortMode=S.removedPositions.length>0; render(); return; }
       const player=S.lineup[pos];
       if(player==null){ openPlayerPicker(pos); return; }
       handleFieldTap(pos, player); return;
@@ -1592,7 +1657,7 @@ document.addEventListener('click', async (e)=>{
   }
   if(d.saveRoster!==undefined){
     const ok=await saveRosterToBackend();
-    S.message=ok?'Roster saved.':'Could not save the roster — try again.';
+    if(!ok) S.error='Could not save the roster — try again.';
     render(); return;
   }
   if(d.tired!==undefined){
@@ -1610,11 +1675,13 @@ document.addEventListener('click', async (e)=>{
   if(d.setupTab!==undefined){ S.setupTab=d.setupTab; render(); return; }
   if(d.details!==undefined){ const hi=+d.details; S.expandedHistory[hi]=!S.expandedHistory[hi]; render(); return; }
   if(d.seasonCsv!==undefined){ downloadCsv('full-season.csv', seasonCsv()); return; }
+  if(d.allHistoryCsv!==undefined){ downloadCsv('all-history.csv', allHistoryCsv()); return; }
+  if(d.exportRoster!==undefined){ downloadCsv('roster.csv', rosterCsv()); return; }
   if(d.clearLineup!==undefined){ S.lineup=[null,null,null,null,null,null,null]; S.removedPositions=[]; S.shortMode=false; render(); return; }
   if(d.managePreferred!==undefined){ openManagePreferred(); return; }
   if(d.clearPreferred!==undefined){
     S.preferredLineup=null; closeModal();
-    S.message='Preferred lineup cleared.'; render(); saveRosterAuto(); return;
+    render(); saveRosterAuto(); return;
   }
   if(d.more!==undefined){ openMoreModal(+d.more); return; }
   if(d.halftimePrefs!==undefined){ openHalftimePrefs(); return; }
@@ -1639,13 +1706,11 @@ document.addEventListener('click', async (e)=>{
     S.roster[i].present=false;
     const pos=S.lineup.indexOf(i);
     if(pos>=0) S.lineup[pos]=null; // departing player keeps minutes; spot can be filled from the bench
-    S.message=S.roster[i].name+' has left — their minutes are kept. Tap the empty spot to fill it.';
     render(); return;
   }
   if(d.arrived!==undefined){
     const i=+d.arrived; closeModal();
     S.roster[i].present=true;
-    S.message=S.roster[i].name+' has arrived and is on the bench.';
     render(); return;
   }
   if(d.startGame!==undefined){
@@ -1672,17 +1737,16 @@ document.addEventListener('click', async (e)=>{
     return;
   }
   if(d.undo!==undefined){ undoLast(); return; }
-  if(d.editLineup!==undefined){ S.running=false; S.editingLive=true; S.screen='setup'; S.message='Edit the lineup, then “Return to live game”. Clock is paused — nothing else resets.'; render(); return; }
+  if(d.editLineup!==undefined){ S.running=false; S.editingLive=true; S.screen='setup'; render(); return; }
   if(d.playShort!==undefined){ openShortChooser(); return; }
   if(d.removePos!==undefined){
     const pos=+d.removePos; pushUndo('play short');
     const player=S.lineup[pos]; S.lineup[pos]=null;
     S.removedPositions=[pos]; S.shortMode=true; closeModal();
-    S.message=POSITIONS[pos]+' removed — '+(player!=null?S.roster[player].name+' is on the bench. ':'')+'Playing 6v7.';
     render(); return;
   }
   if(d.fullStrength!==undefined){
-    pushUndo('full strength'); S.removedPositions=[]; S.shortMode=false; S.message='Back to full strength (7v7). Tap an empty spot to fill it.'; render(); return;
+    pushUndo('full strength'); S.removedPositions=[]; S.shortMode=false; render(); return;
   }
   if(d.editGoals!==undefined){ openEditGoalsLive(); return; }
   if(d.goalMinus!==undefined||d.goalPlus!==undefined||d.goalDel!==undefined){
@@ -1692,10 +1756,10 @@ document.addEventListener('click', async (e)=>{
     openEditGoalsLive(); render(); return;
   }
   if(d.planRefresh!==undefined){ S.planCount=(S.planCount||1)+1; S.plannedLineup=autoLineup(true); render(); return; }
-  if(d.planUse!==undefined){ S.message='Plan set — tap “Start second half” when ready.'; render(); return; }
+  if(d.planUse!==undefined){ render(); return; }
   if(d.startSecond!==undefined){ startSecondHalf(); return; }
   if(d.snapClock!==undefined){
-    S.elapsed=S.settings.matchMinutes*30; S.message='Clock set to '+fmtClock(S.elapsed)+'.'; render(); return;
+    S.elapsed=S.settings.matchMinutes*30; render(); return;
   }
   if(d.backLive!==undefined){ S.editingLive=false; S.screen='live'; render(); return; }
   if(d.newGame!==undefined){ startNewGame(); return; }
@@ -1718,7 +1782,7 @@ document.addEventListener('click', async (e)=>{
     closeModal();
     S.removedPositions=[]; S.shortMode=false;
     S.lineup=S.lastLineup.map(i=>S.roster[i]&&S.roster[i].present?i:null);
-    S.message='Last game’s lineup applied — spots for unavailable players were left empty.'; render(); return;
+    render(); return;
   }
   if(d.usePreferred!==undefined){
     if(!S.preferredLineup) return;
@@ -1731,7 +1795,6 @@ document.addEventListener('click', async (e)=>{
     S.preferredLineup=[...S.lineup];
     // Preferred lineup persists with the roster in Supabase (private
     // app: server persistence), not in memory only.
-    S.message='Preferred starting lineup saved.';
     render(); saveRosterAuto(); return;
   }
   if(d.score!==undefined){
@@ -1811,7 +1874,7 @@ function handleFieldTap(pos, player){
     // Bench-first: bench player selected, field tap completes the sub.
     const incoming=S.selection.player;
     S.queue.push({out:player, in:incoming, pos});
-    S.selection=null; S.message='Queued: '+S.roster[incoming].name+' for '+S.roster[player].name+' ('+POSITIONS[pos]+'). Tap Apply to run it.'; render(); return;
+    S.selection=null; render(); return;
   }
   S.selection={kind:'out', player, pos}; render();
 }
@@ -1819,7 +1882,7 @@ function handleBenchTap(i){
   if(S.selection && S.selection.kind==='out'){
     // Field-first: complete the queued sub. Reset selection so a second sub can start immediately.
     S.queue.push({out:S.selection.player, in:i, pos:S.selection.pos});
-    S.selection=null; S.message='Queued: '+S.roster[i].name+' for '+S.roster[S.queue[S.queue.length-1].out].name+'. Tap Apply to run it.'; render(); return;
+    S.selection=null; render(); return;
   }
   if(S.selection && S.selection.kind==='in' && S.selection.player===i){ S.selection=null; render(); return; }
   // Bench-first: mark this bench player as the selected incoming player.

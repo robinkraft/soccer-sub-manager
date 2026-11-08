@@ -254,9 +254,15 @@ Supabase and the sample names are gone from the screen.
   **never shared**. Lineup pickers show a player's
   already-assigned position next to their name (display only).
 - **History & CSV.** Finished games list score, scorers and minutes,
-  with season totals; each exports a CSV with player, attendance,
-  actual minutes, GK minutes, goals and per-position minutes. With
-  Supabase configured, history comes from the backend and survives
+  with season totals; each game exports its own CSV with player,
+  attendance, actual minutes, GK minutes, goals and per-position
+  minutes. **Export all history** (History tab, next to Full season
+  CSV) is the complete backup: one file with every game — dates,
+  scores, match minutes, played time, starting lineups, per-player
+  minutes, and every goal with scorer, minute and side. **Export
+  roster** (Roster tab) is the roster backup: every player with
+  availability, tired flag, all seven preferred positions and note.
+  With Supabase configured, history comes from the backend and survives
   reloads; without it, it is this session only.
 
 ## Joining a live game (game code)
@@ -379,14 +385,18 @@ The private app's saved state is not readable by the agent, so the
 import goes through its CSV exports. The import script and its docs
 live **outside this repo** (they contain the real roster), at
 `~/workspace/soccer-sub-manager-history-import/` — see
-`docs/history-import.md` in this repo for the steps: export each
-game's CSV from the private app, fill in `manifest.json`, dry-run
+`docs/history-import.md` in this repo for the steps. The primary input
+is the portable app's **Export all history** file (one file, all games
+with lineups and goal minutes, no manifest needed); the fallback is
+one per-game CSV per game plus a `manifest.json` (dates, scores,
+starting lineups, goal minutes when known). Dry-run with
 `node import-history.mjs`, paste the generated SQL into the Supabase
 SQL Editor. Re-running the SQL is safe (dedupe on game_date + score).
 No historical rows have been inserted yet — the import is waiting on
 the CSV exports. After it runs, Season totals in this app must match
 the private app's Season totals screen; that is the verification
-check.
+check. Note: the private app needs the same two exports (Export all
+history, Export roster) for the migration to work from it.
 
 ## Temporary private preview (not the deliverable)
 
