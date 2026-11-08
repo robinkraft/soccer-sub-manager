@@ -1,10 +1,15 @@
-/* Sub Manager (shared) — portable source.
-   Vanilla JS, no build step. Optional Supabase backend (see
-   supabase-config.js): when configured, finished games are saved to
-   the game_history table and the live game syncs via the live_games
-   table (one driver, other phone view-only). When not configured —
-   or when the CDN / Supabase is unreachable — the app falls back to
-   exactly today's in-memory behaviour: reload starts fresh.
+/* Soccer Substitution Manager — portable source.
+   Clean implementation of the PRIVATE app (artifact
+   soccer-substitution-manager-2), not the shared one: same screens,
+   order, labels, controls, and rules, with Supabase replacing the
+   private app's server persistence (SQLite snapshot) and Supabase
+   Auth replacing its owner session. Vanilla JS, no build step.
+   Optional Supabase backend (see supabase-config.js): when
+   configured, finished games are saved to the game_history table
+   and the live game syncs via the live_games table (one driver,
+   other phone view-only). When not configured — or when the CDN /
+   Supabase is unreachable — the app falls back to in-memory
+   behaviour: reload starts fresh.
    Browser storage rule (Robin's correction, 2026-11-07): game and
    history data are NEVER stored in browser storage — no sessionStorage,
    localStorage, IndexedDB, or cookies for game state, history, roster,
@@ -13,13 +18,12 @@
    client stores its session token in localStorage by default, and
    Sign out clears it. That is what lets a coach stay signed in across
    reloads. The per-tab writer id is generated in memory on page load;
-   the live game code comes from the URL (?game=CODE) / in-memory state.
+   the live game code is a 4-letter code the driver shares and the other coach types in on setup.
    Fictional 13-player sample roster only. Never a real roster. */
 'use strict';
 
 /* ---------- Constants ---------- */
 const POSITIONS = ['GK','RB','LB','RM','CM','LM','ST'];
-const POS_BIT = {GK:1,RB:2,LB:4,RM:8,CM:16,LM:32,ST:64};
 /* Fictional sample roster ONLY — this is the fallback shown when no
    saved roster exists in Supabase (or Supabase is not configured).
    The real team roster lives in the Supabase `team_roster` table
@@ -44,8 +48,6 @@ const DEFAULT_ROSTER = [
 ];
 const TEAM_DEFAULT = 'Sample Team';
 
-function prefMask(prefs){ return prefs.reduce((m,p)=>m|(POS_BIT[p]||0),0); }
-function prefsFromMask(mask){ return POSITIONS.filter(p=>mask & POS_BIT[p]); }
 function cloneRoster(src){
   return (src||DEFAULT_ROSTER).map(p=>({
     name:p.name, prefs:[...p.prefs], present:true, tired:false, note:'',
@@ -66,8 +68,11 @@ function freshState(){
   const roster = cloneRoster(); // fictional sample roster (see DEFAULT_ROSTER)
   const n = roster.length;
   return {
-    screen:'setup',            // setup | review | live | halftime | finished | snapshot
-    liveTab:'field',           // field | minutes | team | history
+    screen:'setup',            // setup | review | live | halftime | finished
+    setupTab:'lineup',         // lineup | roster | settings | history (setup tabs, private app)
+    liveTab:'actions',         // actions | minutes | team | positions (live tabs, private app)
+    expandedHistory:{},        // history index -> true when its Details card is open
+    planCount:1,               // halftime "Lineup N" counter
     teamName:TEAM_DEFAULT,
     settings:{matchMinutes:50, cadence:5, subsPerRotation:2, fairTimeThreshold:5, countGoalieTime:false},
     roster,
@@ -87,20 +92,19 @@ function freshState(){
     history:[],                // completed games: from Supabase when configured, else this session only
     startingLineup:null,       // lineup at kickoff of the current game (for the history row)
     lastLineup:null,           // starting lineup of last completed game
-    preferredLineup:null,      // in-memory only, for the current page session; lost on reload
+    preferredLineup:null,      // persisted in Supabase team_roster.preferred_lineup; loaded after sign-in
     plannedLineup:null,        // halftime plan
-    snapshot:null,             // imported #g= snapshot (read-only)
-    snapshotGoals:[],
+    editingLive:false,         // true while the setup screen is being used as the mid-game Edit lineup editor
     halftimeDone:false,
     message:'', error:'',
   };
 }
 /* No browser storage is used for game/history data anywhere in this
    app (no sessionStorage, localStorage, IndexedDB, or cookies for
-   game state, history, roster, or the preferred lineup). The preferred
-   lineup lives only in S.preferredLineup, in memory, for the current
-   page session. The ONE exception is the Supabase Auth session: the
-   Supabase client stores it in localStorage by default (see
+   game state, history, roster, or the preferred lineup). The roster
+   and the preferred lineup live in Supabase (team_roster) and are
+   loaded after sign-in. The ONE exception is the Supabase Auth
+   session: the Supabase client stores it in localStorage by default (see
    initBackend) and Sign out clears it — that is what keeps a coach
    signed in across reloads. */
 
@@ -135,7 +139,7 @@ const SB = {
   rosterRowId: null,      // id of the single team_roster row, once loaded/saved
   rosterLoaded: false,    // true once a saved roster was loaded from Supabase
   rosterFromBackend: false,
-  rosterFromLink: false,  // true when the current roster came from a texted link / live game — do not auto-save it
+  rosterFromLive: false,  // true when the current roster came from a live game — do not auto-save it
   rosterError: '',
 };
 function initBackend() {
@@ -143,7 +147,7 @@ function initBackend() {
   if (!cfg || !cfg.url || !cfg.anonKey) { SB.configured = false; return; }
   if (typeof window.supabase === 'undefined' || !window.supabase.createClient) {
     SB.configured = false;
-    SB.backendError = 'Supabase client failed to load (CDN blocked?) — running in-memory only.';
+    SB.backendError = 'Could not connect — changes are saved on this device only.';
     return;
   }
   try {
@@ -158,7 +162,7 @@ function initBackend() {
     SB.configured = true;
   } catch (e) {
     SB.configured = false;
-    SB.backendError = 'Supabase could not be initialised — running in-memory only.';
+    SB.backendError = 'Could not connect — changes are saved on this device only.';
   }
 }
 
@@ -193,7 +197,7 @@ async function checkAuthSession() {
         S = freshState();
         SB.historyLoaded = false;
         SB.rosterRowId = null; SB.rosterLoaded = false; SB.rosterFromBackend = false;
-        SB.rosterFromLink = false; SB.rosterError = '';
+        SB.rosterFromLive = false; SB.rosterError = '';
         render();
       }
     });
@@ -212,17 +216,14 @@ function loginHtml() {
   // sign-in does not make the coach retype it — only the password.
   const emailVal = SB.authLastEmail ? ' value="' + esc(SB.authLastEmail) + '"' : '';
   return '<section aria-label="Sign in"><h2>Sign in to Sub Manager</h2>'
-    + '<p class="muted">Coaches only — sign in to see history and join a live game. '
-    + 'Your account was created by Robin in Supabase (Authentication → Users).</p>'
+    + '<p class="muted">Coaches only — sign in to see history and join a live game.</p>'
     + err
     + '<div class="card"><label for="auth-email">Email</label>'
     + '<input type="email" id="auth-email" autocomplete="email" placeholder="you@example.com"' + emailVal + '>'
     + '<p><label for="auth-password">Password</label>'
     + '<input type="password" id="auth-password" autocomplete="current-password" placeholder="Password"></p>'
     + '<div class="row"><button class="primary grow" data-signin>Sign in</button></div></div>'
-    + '<p class="muted small">You stay signed in on this device until you sign out — '
-    + 'the sign-in session is saved by Supabase Auth in this browser and cleared when you sign out. '
-    + 'Game and history data are never stored in this browser; they live in Supabase.</p></section>';
+    + '<p class="muted small">You stay signed in on this device until you sign out.</p></section>';
 }
 async function signInWithPassword(email, password) {
   if (!SB.configured || !SB.client) return false;
@@ -251,7 +252,7 @@ async function signOutUser() {
   S = freshState();
   SB.historyLoaded = false; SB.historyError = '';
   SB.rosterRowId = null; SB.rosterLoaded = false; SB.rosterFromBackend = false;
-  SB.rosterFromLink = false; SB.rosterError = '';
+  SB.rosterFromLive = false; SB.rosterError = '';
   render();
 }
 
@@ -262,9 +263,9 @@ async function signOutUser() {
    team_roster is authenticated-only, so the anon key alone gets
    nothing. If no row exists yet — or Supabase is not configured — the
    app falls back to the fictional sample roster in DEFAULT_ROSTER and
-   says so on the Setup screen. A roster from a texted link is adopted
+   says so on the Setup screen. A roster from a live game is adopted
    for that session only and is NEVER auto-saved; the coach saves it
-   explicitly with "Save roster to Supabase". Notes are per-player
+   explicitly with "Save roster". Notes are per-player
    private reminders and are not stored in team_roster. */
 function resizeMinuteArrays() {
   const n = S.roster.length;
@@ -274,14 +275,12 @@ function resizeMinuteArrays() {
   S.lineup = S.lineup.map(x => (x == null || x < n) ? x : null);
 }
 function rosterSourceLabel() {
-  if (SB.rosterFromLink) return 'Roster: from a texted link — not saved yet. Use “Save roster to Supabase” below to keep it.';
-  if (SB.rosterFromBackend) return 'Roster: saved in Supabase (signed-in coaches only).';
-  if (SB.configured && SB.authUser) return 'Roster: sample roster — rename the sample players on the Team tab (or import a setup link) and save it to Supabase.';
-  return 'Roster: sample roster — Supabase is not configured, so nothing is saved between reloads.';
+  if (SB.rosterFromLive) return 'Roster from the live game — not saved yet. Use “Save roster” below to keep it.';
+  return '';
 }
 async function loadRoster() {
   SB.rosterLoaded = false; SB.rosterError = ''; SB.rosterRowId = null;
-  SB.rosterFromBackend = false; SB.rosterFromLink = false;
+  SB.rosterFromBackend = false; SB.rosterFromLive = false;
   if (!SB.configured || !SB.client || !SB.authUser) return false;
   try {
     const { data, error } = await SB.client.from('team_roster')
@@ -295,18 +294,24 @@ async function loadRoster() {
       .map(p => ({
         name: p.name.trim(),
         prefs: Array.isArray(p.prefs) ? p.prefs.filter(x => POSITIONS.includes(x)) : [],
+        note: typeof p.note === 'string' ? p.note : '',
       }));
     if (!players.length) return false;
     S.teamName = (data.team_name && String(data.team_name).trim()) || TEAM_DEFAULT;
     S.roster = players.map(p => ({
       name: p.name, prefs: p.prefs.length ? p.prefs : ['ST', 'RM', 'LM'],
-      present: true, tired: false, note: '',
+      present: true, tired: false, note: p.note || '',
     }));
+    // Preferred lineup persists with the roster (private app: server
+    // persistence). Stored as roster indices in position order.
+    if (Array.isArray(data.preferred_lineup) && data.preferred_lineup.length === 7) {
+      S.preferredLineup = data.preferred_lineup.map(x => x == null ? null : x);
+    }
     resizeMinuteArrays();
     SB.rosterRowId = data.id; SB.rosterLoaded = true; SB.rosterFromBackend = true;
     return true;
   } catch (e) {
-    SB.rosterError = 'Roster could not be loaded from Supabase — using the sample roster.';
+    SB.rosterError = 'Roster could not be loaded.';
     return false;
   }
 }
@@ -315,7 +320,10 @@ async function saveRosterToBackend() {
   if (SB.role === 'viewer' && SB.liveId) return false; // view-only never writes
   const payload = {
     team_name: S.teamName,
-    players: S.roster.map(r => ({ name: r.name, prefs: [...r.prefs] })),
+    // Notes persist with the roster (private app behaviour) but are
+    // private and are never shared.
+    players: S.roster.map(r => ({ name: r.name, prefs: [...r.prefs], note: r.note || '' })),
+    preferred_lineup: (S.preferredLineup || []).map(x => x == null ? null : x),
     updated_at: new Date().toISOString(),
   };
   try {
@@ -327,11 +335,11 @@ async function saveRosterToBackend() {
       if (error) throw error;
       SB.rosterRowId = data.id;
     }
-    SB.rosterFromBackend = true; SB.rosterFromLink = false; SB.rosterLoaded = true;
+    SB.rosterFromBackend = true; SB.rosterFromLive = false; SB.rosterLoaded = true;
     SB.rosterError = '';
     return true;
   } catch (e) {
-    SB.rosterError = 'Roster could not be saved to Supabase — changes are in-memory only for now.';
+    SB.rosterError = 'Roster could not be saved — changes are for this session only.';
     render();
     return false;
   }
@@ -340,9 +348,9 @@ async function saveRosterToBackend() {
    position-prefs change). Never auto-saves a link-imported roster, and
    never fires on page load — loading a roster does not write one. */
 async function saveRosterAuto() {
-  if (SB.rosterFromLink) return;
+  if (SB.rosterFromLive) return;
   const ok = await saveRosterToBackend();
-  if (ok) { S.message = 'Roster saved to Supabase.'; render(); }
+  if (ok) { S.message = 'Roster saved.'; render(); }
 }
 function padArr(arr, n, fill) {
   const out = Array.isArray(arr) ? [...arr] : [];
@@ -355,10 +363,6 @@ function genGameCode() {
   for (let i = 0; i < 4; i++) code += chars[Math.floor(Math.random() * chars.length)];
   return code;
 }
-function liveGameUrl(code) {
-  return location.origin + location.pathname + '?game=' + code;
-}
-
 /* --- History mapping: internal game <-> game_history row (schema.sql) --- */
 /* Backend players store minutes (not seconds): total_minutes is the
    counted total (goalie-adjusted per the setting), goalie_minutes
@@ -400,6 +404,7 @@ function internalGameFromRow(row) {
   return {
     backendId: row.id, date, teamName: row.team_name,
     ourScore: row.our_score, theirScore: row.their_score,
+    playedSeconds: row.elapsed_seconds || 0,
     lineup: (row.starting_lineup || []).map(x => x == null ? null : x),
     players, goals, matchMinutes: row.match_minutes,
   };
@@ -415,10 +420,24 @@ async function loadHistory() {
     // (backendPending) — they are appended below the backend rows.
     const pending = S.history.filter(h => h.backendPending && !h.backendId);
     S.history = (data || []).map(internalGameFromRow).concat(pending);
+    // "Use last game's lineup" must work after a reload too (private
+    // app): the newest saved game's starting lineup, mapped back to
+    // the current roster by player name.
+    if (S.history.length && S.history[0].lineup) {
+      const byName = new Map(S.roster.map((r, i) => [r.name, i]));
+      const mapped = S.history[0].lineup.map(x => {
+        if (x == null) return null;
+        const p = S.history[0].players[x];
+        if (!p) return null;
+        const idx = byName.get(p.name);
+        return (idx != null && S.roster[idx].present) ? idx : null;
+      });
+      if (mapped.some(x => x != null)) S.lastLineup = mapped;
+    }
     SB.historyLoaded = true; SB.historyError = '';
     render();
   } catch (e) {
-    SB.historyError = 'History could not be loaded from Supabase — showing this session only.';
+    SB.historyError = 'History could not be loaded — showing this session only.';
   }
 }
 async function saveHistoryGame(game) {
@@ -427,6 +446,7 @@ async function saveHistoryGame(game) {
     const row = {
       game_date: new Date().toISOString().slice(0, 10),
       team_name: game.teamName, match_minutes: S.settings.matchMinutes,
+      elapsed_seconds: Math.round(S.elapsed),
       our_score: game.ourScore, their_score: game.theirScore,
       players: backendPlayersFromGame(game), goals: backendGoalsFromGame(game),
       starting_lineup: (game.lineup || []).map(x => x == null ? null : x),
@@ -436,8 +456,21 @@ async function saveHistoryGame(game) {
     game.backendId = data.id; game.backendPending = false;
   } catch (e) {
     game.backendPending = true;
-    SB.historyError = 'Finished game saved in-memory only — Supabase unreachable. Download the CSV as a backup.';
+    SB.historyError = 'Game saved on this device only — download the CSV as a backup.';
     render();
+  }
+}
+async function discardHistoryGame(h) {
+  if (!h) return;
+  S.history = S.history.filter(x => x !== h);
+  if (SB.configured && h.backendId) {
+    try {
+      const { error } = await SB.client.from('game_history').delete().eq('id', h.backendId);
+      if (error) throw error;
+    } catch (e) {
+      SB.historyError = 'Game removed here, but the delete did not go through — it may reappear on reload.';
+      render();
+    }
   }
 }
 async function syncHistoryGame(h) {
@@ -450,7 +483,7 @@ async function syncHistoryGame(h) {
     }).eq('id', h.backendId);
     if (error) throw error;
   } catch (e) {
-    SB.historyError = 'Goal edit saved in-memory only — Supabase unreachable.';
+    SB.historyError = 'Goal edit saved on this device only.';
     render();
   }
 }
@@ -550,7 +583,7 @@ function handleRemoteLive(row) {
 }
 async function startLiveDriver() {
   if (!SB.configured) {
-    SB.backendError = 'Backend not configured — live game is in-memory only. See README to turn Supabase on.';
+    SB.backendError = 'Live game could not be started — try again.';
     return;
   }
   const code = genGameCode();
@@ -562,35 +595,34 @@ async function startLiveDriver() {
     }).select('id,version').single();
     if (error) throw error;
     SB.liveId = data.id; SB.liveCode = code; SB.liveVersion = 1; SB.role = 'driver'; SB.offline = false;
-    try { history.replaceState(null, '', location.pathname + '?game=' + code); } catch (e) {}
     subscribeLive();
-    S.message = 'Live game started — code ' + code + '. Share the live link from the Live screen.';
+    S.message = 'Live game started — game code ' + code + '. The other coach enters this code on setup to join.';
   } catch (e) {
-    SB.backendError = 'Live game could not be started in Supabase — running in-memory only.';
+    SB.backendError = 'Live game could not be started — try again.';
   }
 }
 async function joinLiveGame(code) {
-  if (!SB.configured) { S.error = 'This live-game link needs Supabase configured — see README.'; render(); return false; }
+  if (!SB.configured) { S.error = 'Live games need Supabase — sign in first.'; render(); return false; }
   try {
     const { data, error } = await SB.client.from('live_games').select('*').eq('game_code', code).maybeSingle();
     if (error) throw error;
-    if (!data) { S.error = 'Live game ' + code + ' was not found — check the link.'; render(); return false; }
+    if (!data) { S.error = 'Live game ' + code + ' was not found — check the code.'; render(); return false; }
     SB.liveId = data.id; SB.liveCode = code; SB.liveVersion = data.version; SB.role = 'viewer'; SB.offline = false;
     applyLiveState(data.state);
     // The roster here came from the driver's live game, not from
     // team_roster — do not auto-save it. (A viewer can't save anyway;
     // after Take over, the explicit "Save roster" button still works.)
-    SB.rosterFromLink = true; SB.rosterFromBackend = false;
+    SB.rosterFromLive = true; SB.rosterFromBackend = false;
     if (data.phase === 'halftime') S.screen = 'halftime';
     else if (data.phase === 'finished') S.screen = 'finished';
     else S.screen = 'live';
-    S.liveTab = 'field';
+    S.liveTab = 'actions';
     subscribeLive();
     S.message = 'Watching live (view-only) — the driver is driving this game.';
     render();
     return true;
   } catch (e) {
-    S.error = 'Could not load live game ' + code + ' — Supabase unreachable.';
+    S.error = 'Could not load live game.';
     render();
     return false;
   }
@@ -640,7 +672,7 @@ async function takeOverLive() {
     S.message = 'You are now driving this game.';
     render();
   } catch (e) {
-    S.error = 'Takeover failed — Supabase unreachable.';
+    S.error = 'Takeover failed — try again.';
     render();
   }
 }
@@ -661,7 +693,6 @@ async function finishLiveGame() {
 function resetLiveSession() {
   unsubscribeLive();
   SB.liveId = null; SB.liveCode = null; SB.liveVersion = 0; SB.role = null; SB.conflict = null; SB.viewerAnchor = null;
-  try { history.replaceState(null, '', location.pathname); } catch (e) {}
 }
 
 /* ---------- Undo ---------- */
@@ -700,17 +731,27 @@ function totalSec(i){ // total counted toward game time, per goalie toggle
   return S.settings.countGoalieTime ? S.minutesSec[i] : (S.minutesSec[i]-S.gkSec[i]);
 }
 function fairShareSec(){
+  // Fair share is computed on the same counted basis as the totals:
+  // when goalie time is excluded, only the six non-goalie field slots
+  // count toward a player's share of the game.
   const present=S.roster.filter(r=>r.present).length || 1;
-  return S.settings.matchMinutes*60*fieldCount()/present;
+  const countedSlots=S.settings.countGoalieTime ? fieldCount() : fieldCount()-1;
+  return S.settings.matchMinutes*60*countedSlots/present;
 }
 function projectedSec(i){
   const remaining=Math.max(0, S.settings.matchMinutes*60 - S.elapsed);
   const onPos=S.lineup.indexOf(i);
+  // A player standing in goal accrues counted minutes only when the
+  // "Count goalie time" setting is ON; otherwise their projection
+  // stays flat while they are in goal.
+  const onCounts = onPos>=0 && (onPos!==0 || S.settings.countGoalieTime);
   let proj=totalSec(i);
-  if(onPos>=0) proj+=remaining;
+  if(onCounts) proj+=remaining;
   // queued sub: if this player is coming on, they get the remaining time instead of the outgoing player
   for(const q of S.queue){
-    if(q.in===i) proj+=remaining;
+    // q.pos is the spot being filled (0 = GK).
+    const inCounts = (q.pos!==0 || S.settings.countGoalieTime);
+    if(q.in===i && inCounts) proj+=remaining;
     if(q.out===i) proj=Math.max(totalSec(i), proj-remaining);
   }
   return Math.max(totalSec(i), proj);
@@ -732,7 +773,7 @@ function goalLabel(g){
 
 /* ---------- Lineup generation ---------- */
 function autoLineup(favourLow){
-  const present=S.roster.map((r,i)=>i).filter(i=>r.present);
+  const present=S.roster.map((r,i)=>i).filter(i=>S.roster[i].present);
   const pool=shuffle(present);
   // Prefer low-minute players for halftime plans
   if(favourLow) pool.sort((a,b)=>totalSec(a)-totalSec(b));
@@ -756,135 +797,6 @@ function applyLineup(lineup){
   S.lineup=[...lineup];
   S.removedPositions=[]; S.shortMode=false;
 }
-
-/* ---------- v5 link format ---------- */
-/* Payload = 'v5' + base64url(deflate-raw(UTF-8 JSON)), no padding.
-   Inner: ["ssm",4,"s",team,settings,roster,lineup] or
-          ["ssm",4,"g",team,settings,roster,lineup,matchMin,elapsed,us,them,
-           minutesTenths,presentMask,tiredMask,plannedLineup,rotation,goals]
-   settings = [matchMinutes, cadence, subsPerRotation, fairTimeThreshold]
-   (+ optional 5th element 1/0 for countGoalieTime; importer accepts 4 or 5) */
-function b64urlEncode(bytes){
-  let bin=''; bytes.forEach(b=>{bin+=String.fromCharCode(b);});
-  return btoa(bin).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
-}
-function b64urlDecode(str){
-  const s=str.replace(/-/g,'+').replace(/_/g,'/');
-  const bin=atob(s+'=='.slice(0,(4-s.length%4)%4));
-  const out=new Uint8Array(bin.length);
-  for(let i=0;i<bin.length;i++) out[i]=bin.charCodeAt(i);
-  return out;
-}
-async function encodePayload(inner){
-  if(typeof CompressionStream==='undefined') throw new Error('This browser does not support CompressionStream, so links cannot be created here. Copy the setup manually instead.');
-  const data=new TextEncoder().encode(JSON.stringify(inner));
-  const cs=new CompressionStream('deflate-raw');
-  const compressed=new Uint8Array(await new Response(new Blob([data]).stream().pipeThrough(cs)).arrayBuffer());
-  return 'v5'+b64urlEncode(compressed);
-}
-async function decodePayload(payload){
-  if(typeof DecompressionStream==='undefined') throw new Error('This browser does not support DecompressionStream, so this link cannot be imported here.');
-  if(!payload.startsWith('v5')) throw new Error('old');
-  const raw=b64urlDecode(payload.slice(2));
-  const ds=new DecompressionStream('deflate-raw');
-  const text=await new Response(new Blob([raw]).stream().pipeThrough(ds)).text();
-  return JSON.parse(text);
-}
-function rosterFromLink(arr){
-  return arr.map(([name,mask,present])=>({
-    name, prefs:prefsFromMask(mask), present:!!present, tired:false, note:'',
-  }));
-}
-function rosterToLink(){
-  return S.roster.map(r=>[r.name, prefMask(r.prefs), r.present?1:0]);
-}
-function settingsToLink(){
-  return [S.settings.matchMinutes, S.settings.cadence, S.settings.subsPerRotation,
-          S.settings.fairTimeThreshold, S.settings.countGoalieTime?1:0];
-}
-function settingsFromLink(a){
-  if(!Array.isArray(a)||a.length<4) throw new Error('old');
-  return {matchMinutes:a[0], cadence:a[1], subsPerRotation:a[2], fairTimeThreshold:a[3],
-          countGoalieTime: a.length>=5 ? !!a[4] : false};
-}
-function validateGoals(goals){
-  if(!Array.isArray(goals)) throw new Error('old');
-  for(const g of goals){
-    if(!Array.isArray(g)||g.length!==2) throw new Error('old');
-    const [p,sec]=g;
-    if(!(p===-1 || (Number.isInteger(p)&&p>=0&&p<S.roster.length))) throw new Error('old');
-    if(!(sec===null || (Number.isInteger(sec)&&sec>=0))) throw new Error('old');
-  }
-  return goals;
-}
-async function exportSetupLink(){
-  const inner=['ssm',4,'s',S.teamName,settingsToLink(),rosterToLink(),S.lineup.map(x=>x==null?-1:x)];
-  // Lineup in the spec is 7 roster indices; use -1 for an empty spot.
-  const payload=await encodePayload(inner);
-  return location.origin+location.pathname+'#s='+payload;
-}
-async function exportGameLink(){
-  const minutesTenths=S.roster.map((r,i)=>Math.round(S.minutesSec[i]/6)); // minutes x10 = seconds/6
-  let presentMask=0, tiredMask=0;
-  S.roster.forEach((r,i)=>{ if(r.present) presentMask|=(1<<i); if(r.tired) tiredMask|=(1<<i); });
-  const rotation=S.queue.map(q=>[q.out,q.in,q.pos]);
-  const goals=S.goals.map(g=>[g.player, g.seconds]);
-  const inner=['ssm',4,'g',S.teamName,settingsToLink(),rosterToLink(),
-    S.lineup.map(x=>x==null?-1:x), S.settings.matchMinutes, Math.round(S.elapsed),
-    S.ourScore, S.theirScore, minutesTenths, presentMask, tiredMask,
-    (S.plannedLineup||S.lineup).map(x=>x==null?-1:x), rotation, goals];
-  const payload=await encodePayload(inner);
-  return location.origin+location.pathname+'#g='+payload;
-}
-function parsePastedLink(text){
-  const t=(text||'').trim();
-  const m=t.match(/#([sg])=([A-Za-z0-9\-_]+)/);
-  if(m) return {kind:m[1], payload:m[2]};
-  const m2=t.match(/^([sg])=([A-Za-z0-9\-_]+)/);
-  if(m2) return {kind:m2[1], payload:m2[2]};
-  if(t.startsWith('v5')) return {kind:null, payload:t}; // kind decided by inner JSON
-  throw new Error('old');
-}
-async function importLink(text){
-  const {kind, payload}=parsePastedLink(text);
-  const inner=await decodePayload(payload);
-  if(!Array.isArray(inner)||inner[0]!=='ssm'||inner[1]!==4) throw new Error('old');
-  const type=inner[2];
-  if(type==='s'){
-    if(inner.length!==7) throw new Error('old');
-    S.teamName=inner[3]; S.settings=settingsFromLink(inner[4]);
-    S.roster=rosterFromLink(inner[5]);
-    resizeMinuteArrays();
-    // A link's roster is coach-to-coach and stays in-memory for this
-    // session — it is NOT written to team_roster unless the coach
-    // taps "Save roster to Supabase" on the Setup screen.
-    SB.rosterFromLink=true; SB.rosterFromBackend=false;
-    S.lineup=inner[6].map(x=>x===-1?null:x);
-    S.removedPositions=[]; S.shortMode=false; S.screen='setup';
-    S.message='Setup imported — roster adopted from the link.';
-  } else if(type==='g'){
-    if(inner.length<16) throw new Error('old');
-    const goals=inner.length>=17 ? validateGoals(inner[16]) : [];
-    S.teamName=inner[3]; S.settings=settingsFromLink(inner[4]);
-    S.roster=rosterFromLink(inner[5]);
-    resizeMinuteArrays();
-    SB.rosterFromLink=true; SB.rosterFromBackend=false;
-    // Present/tired masks
-    const presentMask=inner[13], tiredMask=inner[14];
-    S.roster.forEach((r,i)=>{ r.present=!!(presentMask&(1<<i)); r.tired=!!(tiredMask&(1<<i)); });
-    S.snapshot={
-      lineup:inner[6].map(x=>x===-1?null:x),
-      matchMinutes:inner[7], elapsed:inner[8], ourScore:inner[9], theirScore:inner[10],
-      minutesTenths:inner[11], plannedLineup:inner[15].map(x=>x===-1?null:x),
-      rotation:inner[12]||[],
-    };
-    S.snapshotGoals=goals.map(([player,seconds])=>({player,seconds,side:'us'}));
-    S.screen='snapshot';
-    S.message='Snapshot imported — frozen at '+fmtClock(inner[8])+', not live.';
-  } else throw new Error('old');
-  render();
-}
-const LINK_ERROR='This link looks broken or is from an older version — ask for a fresh link.';
 
 /* ---------- Rendering ---------- */
 const mainEl=document.getElementById('main');
@@ -912,10 +824,8 @@ function startClock(){
     });
     const c=$('#clock'); if(c) c.textContent=fmtClock(S.elapsed);
     const mins=$('#live-minutes-inline'); if(mins) mins.innerHTML=minutesRowsHtml();
-    if(S.elapsed>=S.settings.matchMinutes*60 && S.screen==='live'){
-      S.running=false; S.message='Full time reached — you can end the game when ready.';
-      render();
-    }
+    // The clock keeps running past full time (private app): overage
+    // shows next to the clock. It never stops itself — End game does.
   },1000);
 }
 function fieldSpotHtml(pos, opts){
@@ -924,24 +834,35 @@ function fieldSpotHtml(pos, opts){
   const queuedOff=S.queue.find(q=>q.pos===pos);
   const staged=S.swapPair.includes(pos);
   const sel=S.selection && S.selection.kind==='out' && S.selection.pos===pos;
-  let cls='chip', badge='', pair='';
+  let cls='chip', badge='';
   if(removed){ cls+=' removed'; }
   else if(p==null){ cls+=' empty'; }
   else{
     if(S.roster[p].tired) cls+=' tired';
     if(sel||staged) cls+= staged?' swap-staged':' selected';
-    if(queuedOff){ cls+=' queued-off'; badge='<span class="badge off">↓ '+POSITIONS[pos]+'</span>'; pair='<div class="pair-line"><span class="pair">→ '+esc(S.roster[queuedOff.in].name)+'</span></div>'; }
+    if(queuedOff){ cls+=' queued-off'; badge='<span class="badge off">↓ '+POSITIONS[pos]+'</span>'; }
   }
-  const name=removed?'Removed':(p==null?'':esc(S.roster[p].name));
+  // Empty spot shows just its position label (private app); a filled
+  // spot shows no position label — the spot's place on the field says it.
+  const name=removed?'Removed':(p==null?POSITIONS[pos]:esc(S.roster[p].name));
+  // Live field chips show the player's counted minutes under the name
+  // (private app); setup / review / finished chips show just the name.
+  // A queued-in player is shown inside the chip ("-> name"), with the
+  // position badge on the chip's top edge — never as a line under it.
+  const mins=(opts.showMinutes && p!=null && !removed)?'<span class="mins">'+Math.round(totalSec(p)/60)+'m</span>':'';
+  const pairIn=queuedOff?'<span class="pair">\u2192 '+esc(S.roster[queuedOff.in].name)+'</span>':'';
+  const chipInner='<span>'+name+'</span>'+mins+pairIn;
   const inner=opts.readonly
-    ? '<span>'+name+'</span>'
-    : '<button class="'+cls+'" data-spot="'+pos+'" aria-label="'+POSITIONS[pos]+' '+(name||'empty')+'">'+name+'</button>';
-  return '<div class="spot"><div class="pos-label">'+POSITIONS[pos]+'</div>'+badge+inner+pair+'</div>';
+    ? '<div class="'+cls+'">'+chipInner+'</div>'
+    : '<button class="'+cls+'" data-spot="'+pos+'" aria-label="'+POSITIONS[pos]+' '+(name||'empty')+'">'+chipInner+'</button>';
+  return '<div class="spot">'+badge+inner+'</div>';
 }
 function fieldHtml(opts){
   opts=opts||{};
   // Layout: ST top, RM/CM/LM middle, RB/LB defence, GK in box. Same component everywhere.
   const row=(positions)=>'<div class="f-row'+(positions.length===3?' mid':'')+'">'+positions.map(p=>fieldSpotHtml(p,opts)).join('')+'</div>';
+  // Our half only: ST top, midfield, defence, GK in the box at the
+  // bottom. Only the outer border and the GK box are drawn.
   return '<div class="field" role="group" aria-label="Field, 1-2-3-1">'
     + row([6])
     + row([3,4,5])
@@ -956,13 +877,19 @@ function benchHtml(){
     const q=S.queue.find(x=>x.in===i);
     const sel=S.selection && S.selection.kind==='in' && S.selection.player===i;
     const cls=['', S.roster[i].tired?'tired':'', sel?'selected':'', q?'queued-on':''].join(' ');
-    const sub=q?'<span class="b-sub">↑ '+POSITIONS[q.pos]+' for '+esc(S.roster[q.out].name)+'</span>'
-      :'<span class="b-sub">'+fmtMin(S.minutesSec[i])+' min</span>';
-    return '<button class="'+cls+'" data-bench="'+i+'">'+esc(S.roster[i].name)+(S.roster[i].tired?' <span class="tired-dot">● tired</span>':'')+sub+'</button>';
+    // Private bench: one line — name left, minutes right. A queued-in
+    // player instead shows the position badge and "for <out>" on a
+    // second line, with no minutes.
+    const name=esc(S.roster[i].name)+(S.roster[i].tired?' <span class="tired-dot">\u25cf</span>':'');
+    const top=q
+      ? '<span class="b-name">'+name+'</span><span class="b-badge">\u2191 '+POSITIONS[q.pos]+'</span>'
+      : '<span class="b-name">'+name+'</span><span class="b-mins">'+Math.round(totalSec(i)/60)+'m</span>';
+    const sub=q?'<span class="b-sub">for '+esc(S.roster[q.out].name)+'</span>':'';
+    return '<button class="'+cls+'" data-bench="'+i+'">'+top+sub+'</button>';
   }).join('')+'</div>';
 }
 function minutesRowsHtml(){
-  const present=S.roster.map((r,i)=>i).filter(i=>r.present);
+  const present=S.roster.map((r,i)=>i).filter(i=>S.roster[i].present);
   present.sort((a,b)=>totalSec(b)-totalSec(a));
   return present.map(i=>{
     const f=flagFor(i), g=goalsFor(i);
@@ -976,47 +903,136 @@ function minutesRowsHtml(){
   }).join('');
 }
 function teamRowsHtml(){
+  // Compact Roster tab: one short row per player, ~86px tall.
+  // Line 1 (no wrap, always fits): availability circle, name + status
+  // ("Bench · 0m · 5 pos" — where/minutes/position count condensed
+  // into one muted run; "Absent · N pos" when absent), Rename + More
+  // as small buttons. Line 2: all 7 position chips in a single row,
+  // green check on preferred positions; tap a chip to toggle it (at
+  // least one preferred position is always kept). A note, if any, is
+  // its own small line. Nothing is dropped to save space.
   const idx=S.roster.map((r,i)=>i).sort((a,b)=>S.roster[a].name.localeCompare(S.roster[b].name));
+  const inGame = (S.screen === 'live' || S.screen === 'halftime');
   return idx.map(i=>{
     const r=S.roster[i], pos=S.lineup.indexOf(i), g=goalsFor(i);
     const where=pos>=0?POSITIONS[pos]:'Bench';
-    return '<div class="mrow"><div style="min-width:0"><span class="name">'+esc(r.name)+'</span>'
-      +(g?' <span>⚽ '+g+'</span>':'')+' <span class="muted">'+where+' &middot; '+fmtMin(totalSec(i))+' min</span>'
-      +'<div class="note-line">'+(r.note?esc(r.note):'<button class="small" data-note="'+i+'">Add note</button>')+'</div></div>'
-      +'<div class="nums"><button class="small" data-note="'+i+'">'+(r.note?'Edit note':'Note')+'</button> '
-      +'<button class="small" data-tired="'+i+'">'+(r.tired?'Untire':'Tired')+'</button> '
-      +'<button class="small" data-prefs="'+i+'">Positions</button> '
-      +'<button class="small" data-rename="'+i+'">Rename</button> '
-      +'<button class="small danger" data-remove-player="'+i+'">Remove</button></div></div>';
+    const status = r.present
+      ? where+' &middot; '+fmtMin(totalSec(i))+' min &middot; '+r.prefs.length+' pos'
+      : 'Absent &middot; '+r.prefs.length+' pos';
+    const chips=POSITIONS.map(pp=>'<button data-pref-inline="'+pp+'" data-player="'+i+'" aria-pressed="'+r.prefs.includes(pp)+'">'+(r.prefs.includes(pp)?'\u2713 ':'')+pp+'</button>').join('');
+    // Mid-game arrivals and departures (private Team tab): a departing
+    // player keeps their minutes and their spot can be filled from the
+    // bench; a late arrival joins the bench. Sits at the end of the
+    // chips row so line 1 never wraps.
+    const arriveLeave = inGame
+      ? (r.present
+          ? '<button class="xs" data-leaving="'+i+'">Leaving</button>'
+          : '<button class="xs" data-arrived="'+i+'">Arrived</button>')
+      : '';
+    return '<div class="card roster-row"><div class="roster-top"><button class="avail'+(r.present?'':' absent')+'" data-attend="'+i+'" aria-label="Toggle availability for '+esc(r.name)+'">'+(r.present?'\u2713':'')+'</button>'
+      +'<div class="roster-id"><span class="name">'+esc(r.name)+'</span>'
+      +(g?' <span>\u26bd '+g+'</span>':'')+' <span class="muted small">'+status+'</span></div>'
+      +'<button class="xs" data-rename="'+i+'">Rename</button><button class="xs" data-more="'+i+'">More</button></div>'
+      +(r.note?'<div class="note-line">'+esc(r.note)+'</div>':'')
+      +'<div class="pos-chips">'+chips+arriveLeave+'</div></div>';
+  }).join('');
+}
+function positionsRowsHtml(){
+  // Live Positions tab: name + preferred positions, chips tappable.
+  return S.roster.map((r,i)=>i).sort((a,b)=>S.roster[a].name.localeCompare(S.roster[b].name)).map(i=>{
+    const r=S.roster[i];
+    const chips=POSITIONS.map(pp=>'<button data-pref-inline="'+pp+'" data-player="'+i+'" aria-pressed="'+r.prefs.includes(pp)+'">'+(r.prefs.includes(pp)?'\u2713 ':'')+pp+'</button>').join('');
+    return '<div class="card"><div class="row spread"><span class="name">'+esc(r.name)+'</span><span class="muted">'+r.prefs.join(' &middot; ')+'</span></div><div class="pos-chips">'+chips+'</div></div>';
   }).join('');
 }
 function seasonTotalsHtml(){
   if(!S.history.length) return '';
   const totals = new Map();
   S.history.forEach(h => (h.players || []).forEach(p => {
-    const t = totals.get(p.name) || { name: p.name, seconds: 0, games: 0, goals: 0 };
-    t.seconds += (p.seconds || 0); t.goals += (p.goals || 0); t.games += 1;
+    const t = totals.get(p.name) || { name: p.name, seconds: 0, games: 0, goals: 0, gkSeconds: 0, pos: {} };
+    // p.seconds is the COUNTED total (goalie-adjusted per the setting);
+    // p.gkSeconds and the per-position breakdown keep goalie minutes
+    // separately, so they still show even when the total excludes them.
+    t.seconds += (p.seconds || 0); t.gkSeconds += (p.gkSeconds || 0); t.goals += (p.goals || 0);
+    if (p.present) t.games += 1;
+    Object.entries(p.posSeconds || {}).forEach(([k, v]) => { t.pos[k] = (t.pos[k] || 0) + v; });
     totals.set(p.name, t);
   }));
+  // Card layout from the private Season totals screen: name + games on
+  // the left, average per game large on the right with the bold total
+  // beneath it, per-position breakdown (whole minutes, position order,
+  // goalie minutes included) along the bottom. Sorted by total minutes
+  // descending. Average uses exact seconds / games played (one decimal),
+  // total is the rounded whole-minute counted total.
   const rows = [...totals.values()].sort((a, b) => b.seconds - a.seconds)
-    .map(t => '<div class="mrow"><span class="name">' + esc(t.name) + '</span><span class="nums">' + fmtMin(t.seconds) + ' min total &middot; ' + fmtMin(t.seconds / Math.max(1, t.games)) + ' avg/game' + (t.goals ? ' &middot; ⚽ ' + t.goals : '') + '</span></div>').join('');
-  return '<div class="card"><h3>Season totals (' + S.history.length + ' game' + (S.history.length === 1 ? '' : 's') + ')</h3>' + rows + '</div>';
+    .map(t => {
+      const posLine = POSITIONS
+        .filter(k => Math.round((t.pos[k] || 0) / 60) > 0)
+        .map(k => k + ' ' + Math.round((t.pos[k] || 0) / 60) + 'm').join(' &middot; ');
+      const avg = t.games ? ((t.seconds / 60) / t.games).toFixed(1) : '0.0';
+      return '<div class="card season-card"><div class="row spread"><div><span class="season-name">' + esc(t.name) + '</span></div>'
+        + '<div style="text-align:right"><div><span class="season-avg">' + avg + '</span> <span class="muted">avg/game</span></div>'
+        + '<div class="season-total">' + Math.round(t.seconds / 60) + ' <span class="muted" style="font-size:15px">min</span></div></div></div>'
+        + '<div><strong>' + t.games + '</strong> <span class="muted">game' + (t.games === 1 ? '' : 's') + '</span></div>'
+        + (posLine ? '<div class="muted season-pos">' + posLine + '</div>' : '') + '</div>';
+    }).join('');
+  return '<div class="row spread" style="align-items:baseline"><h2 style="margin-bottom:2px">Season totals</h2>'
+    + '<button class="season-csv-link" data-season-csv>&darr; Full season CSV</button></div>'
+    + '<p class="muted" style="margin-top:0">' + S.history.length + ' game' + (S.history.length === 1 ? '' : 's')
+    + ' &middot; ' + (S.settings.countGoalieTime ? 'goalie time counts toward totals' : 'totals exclude goalie time (shown in the breakdown)') + '</p>'
+    + rows;
+}
+function seasonCsv(){
+  // Same totals as the Season totals cards, one row per player.
+  const totals = new Map();
+  S.history.forEach(h => (h.players || []).forEach(p => {
+    const t = totals.get(p.name) || { name: p.name, seconds: 0, games: 0, goals: 0, gkSeconds: 0, pos: {} };
+    t.seconds += (p.seconds || 0); t.gkSeconds += (p.gkSeconds || 0); t.goals += (p.goals || 0);
+    if (p.present) t.games += 1;
+    Object.entries(p.posSeconds || {}).forEach(([k, v]) => { t.pos[k] = (t.pos[k] || 0) + v; });
+    totals.set(p.name, t);
+  }));
+  const head = ['Player','Games played','Avg minutes per game','Total minutes','GK minutes','Goals', ...POSITIONS].join(',') + '\n';
+  const lines = [...totals.values()].sort((a, b) => b.seconds - a.seconds).map(t => {
+    const cells = [t.name, t.games, t.games ? ((t.seconds / 60) / t.games).toFixed(1) : '0.0',
+      (t.seconds / 60).toFixed(1), (t.gkSeconds / 60).toFixed(1), t.goals,
+      ...POSITIONS.map(k => ((t.pos[k] || 0) / 60).toFixed(1))];
+    return cells.map(v => '"' + String(v).replace(/"/g, '""') + '"').join(',');
+  });
+  return head + lines.join('\n') + '\n';
 }
 function historyHtml(){
   let status = '';
   if (SB.configured) {
     if (SB.historyError) status = '<p class="muted">' + esc(SB.historyError) + '</p>';
-    else if (!SB.historyLoaded) status = '<p class="muted">Loading history from Supabase…</p>';
-  } else {
-    status = '<p class="muted">Backend not configured — history is in-memory only for this session. See README to turn Supabase on.</p>';
+    else if (!SB.historyLoaded) status = '<p class="muted">Loading history\u2026</p>';
   }
   if(!S.history.length) return status + '<p class="muted">No finished games yet.</p>';
-  return status + seasonTotalsHtml() + S.history.map((h,hi)=>{
-    const rows=h.players.map(p=>'<div class="mrow"><span class="name">'+esc(p.name)+'</span><span class="nums">'+fmtMin(p.seconds)+' min'+(p.gkSeconds?' (GK '+fmtMin(p.gkSeconds)+')':'')+(p.goals?' ⚽ '+p.goals:'')+'</span></div>').join('');
-    return '<details><summary>'+esc(h.date)+' — '+esc(h.teamName)+' '+h.ourScore+'–'+h.theirScore
-      +(h.goals.length?' — '+h.goals.map(goalLabel).join(', '):'')+'</summary>'
-      +'<div class="row"><button class="small" data-csv="'+hi+'">Download CSV</button> '
-      +'<button class="small" data-editgoals="'+hi+'">Edit goals</button></div>'+rows+'</details>';
+  return status + seasonTotalsHtml() + '<h2>Past games</h2>' + S.history.map((h,hi)=>{
+    const open = !!S.expandedHistory[hi];
+    const played = h.playedSeconds ? fmtClock(h.playedSeconds) + ' played' : '';
+    const head = '<div class="row spread"><div><strong>' + esc(h.date) + '</strong>'
+      + '<div class="muted">' + (played ? played + ' &middot; ' : '') + 'US ' + h.ourScore + ' \u2013 ' + h.theirScore + ' THEM</div></div>'
+      + '<button class="small" data-details="' + hi + '">' + (open ? 'Hide' : 'Details') + '</button></div>';
+    if (!open) return '<div class="card">' + head + '</div>';
+    const goalLines = (h.goals || []).map(goalLabel).join(', ') || 'No goals recorded';
+    const rows = h.players.map(p => {
+      // Per-player row: counted total (whole minutes) on the right,
+      // per-position breakdown below the name — goalie minutes included
+      // in the breakdown even when the total excludes them.
+      const posLine = POSITIONS
+        .filter(k => (p.posSeconds || {})[k] > 0)
+        .map(k => k + ' ' + Math.round(((p.posSeconds || {})[k] || 0) / 60) + 'm').join(' &middot; ');
+      return '<div class="mrow"><div style="min-width:0"><span class="name">' + esc(p.name) + '</span>'
+        + (p.goals ? ' \u26bd ' + p.goals : '')
+        + (posLine ? '<div class="note-line">' + posLine + '</div>' : '') + '</div>'
+        + '<div class="nums">' + Math.round((p.seconds || 0) / 60) + ' min</div></div>';
+    }).join('');
+    return '<div class="card">' + head
+      + '<div class="row" style="margin:8px 0"><button class="small" data-csv="' + hi + '">Export this game CSV</button> '
+      + '<button class="small" data-editgoals="' + hi + '">Edit goals</button></div>'
+      + '<h3>Goals</h3><p>' + esc(goalLines) + '</p>'
+      + rows + '</div>';
   }).join('');
 }
 function csvForGame(h){
@@ -1033,11 +1049,23 @@ function downloadCsv(filename, text){
 
 /* ---------- Modals ---------- */
 function openModal(html){ modalRoot.innerHTML='<div class="overlay" data-overlay><div class="sheet" role="dialog" aria-modal="true">'+html+'</div></div>'; }
-function closeModal(){ modalRoot.innerHTML=''; }
+function closeModal(){ modalRoot.innerHTML=''; confirmAction=null; }
+/* In-page confirmation sheet — the app's only confirmation UI.
+   Native dialogs are never used (they are blocked inside the Muse
+   preview sandbox, and a sheet is better on a phone too). onConfirm
+   runs only when the Confirm button is tapped; closing the sheet any
+   other way cancels it. */
+let confirmAction=null;
+function openConfirm(opts){
+  confirmAction=opts.onConfirm||null;
+  openModal('<h2>'+esc(opts.title)+'</h2><p>'+esc(opts.body)+'</p>'
+    +'<div class="pin-bottom"><button class="'+(opts.danger?'danger':'primary')+'" data-confirm-yes>'+esc(opts.confirmLabel||'Confirm')+'</button>'
+    +'<button class="ghost" data-close>Cancel</button></div>');
+}
 let scorerMinute=null;
 function openPlayerPicker(pos){
   const assigned=new Map(); S.lineup.forEach((p,i)=>{ if(p!=null) assigned.set(p, POSITIONS[i]); });
-  const present=S.roster.map((r,i)=>i).filter(i=>r.present);
+  const present=S.roster.map((r,i)=>i).filter(i=>S.roster[i].present);
   const prefFirst=present.filter(i=>S.roster[i].prefs.includes(POSITIONS[pos]));
   const others=present.filter(i=>!S.roster[i].prefs.includes(POSITIONS[pos]));
   const ordered=[...prefFirst, ...others];
@@ -1054,14 +1082,14 @@ function openPlayerPicker(pos){
 }
 function openScorerPicker(side){
   scorerMinute=Math.floor(S.elapsed/60);
-  const idx=S.roster.map((r,i)=>i).filter(i=>r.present)
+  const idx=S.roster.map((r,i)=>i).filter(i=>S.roster[i].present)
     .sort((a,b)=>S.roster[a].name.localeCompare(S.roster[b].name));
   const half=Math.ceil(idx.length/2);
   const colMajor=[...idx.slice(0,half), ...idx.slice(half)]; // grid is 2-col; DOM order gives column-major reading
   const rows=colMajor.map(i=>{
     const pos=S.lineup.indexOf(i);
     return '<button data-scorer="'+i+'" data-side="'+side+'">'+esc(S.roster[i].name)
-      +'<span class="sub">'+(pos>=0?POSITIONS[pos]:'Bench')+'</span></button>';
+      +' &middot; '+(pos>=0?POSITIONS[pos]:'Bench')+'</button>';
   }).join('');
   openModal('<h2>Who scored?</h2>'
     +'<div class="stepper"><button data-step="-1" aria-label="One minute earlier">−</button>'
@@ -1074,9 +1102,35 @@ function openScorerPicker(side){
     +'<button class="ghost" data-close>Cancel</button></div>');
 }
 function openNoteEditor(i){
-  openModal('<h2>Note — '+esc(S.roster[i].name)+'</h2><p class="muted">Private reminder. Notes are never included in texted links.</p>'
+  openModal('<h2>Note — '+esc(S.roster[i].name)+'</h2><p class="muted">Private reminder. Notes are never shared.</p>'
     +'<textarea id="note-text">'+esc(S.roster[i].note||'')+'</textarea>'
     +'<div class="row" style="margin-top:8px"><button class="primary" data-save-note="'+i+'">Save note</button><button class="ghost" data-close>Cancel</button></div>');
+}
+function openMoreModal(i){
+  const r=S.roster[i];
+  openModal('<h2>'+esc(r.name)+'</h2>'
+    +'<div class="pin-bottom">'
+    +'<button data-note="'+i+'">'+(r.note?'Edit note':'Add note')+'</button>'
+    +'<button data-tired="'+i+'">'+(r.tired?'Untire':'Mark tired')+'</button>'
+    +'<button data-prefs="'+i+'">Position preferences</button>'
+    +'<button class="danger" data-remove-player="'+i+'">Remove player</button>'
+    +'<button class="ghost" data-close>Close</button></div>');
+}
+function openManagePreferred(){
+  const ready=!!S.preferredLineup;
+  openModal('<h2>Preferred lineup</h2><p class="muted">'
+    +(ready?'A preferred starting lineup is saved with the roster.':'No preferred lineup saved yet — set a lineup on the field, then save it here.')
+    +'</p><div class="pin-bottom">'
+    +(ready?'<button data-use-preferred>Use preferred lineup</button>':'')
+    +'<button data-save-preferred>Save current lineup as preferred</button>'
+    +(ready?'<button class="danger" data-clear-preferred>Clear preferred lineup</button>':'')
+    +'<button class="ghost" data-close>Close</button></div>');
+}
+function openHalftimePrefs(){
+  const rows=S.roster.map((r,i)=>i).filter(i=>S.roster[i].present)
+    .sort((a,b)=>S.roster[a].name.localeCompare(S.roster[b].name))
+    .map(i=>'<div class="mrow"><span class="name">'+esc(S.roster[i].name)+'</span><span class="nums muted">'+S.roster[i].prefs.join(' &middot; ')+'</span></div>').join('');
+  openModal('<h2>Position preferences</h2><p class="muted">Preferred positions per player. Preferences guide, never block.</p>'+rows+'<div class="pin-bottom"><button class="ghost" data-close>Close</button></div>');
 }
 function openPrefsEditor(i){
   const r=S.roster[i];
@@ -1086,7 +1140,7 @@ function openPrefsEditor(i){
 }
 function openRenameEditor(i){
   const r=S.roster[i];
-  openModal('<h2>Rename player</h2><p class="muted">Renaming a sample player is how you seed the real roster — see README. The new name saves to Supabase (when signed in).</p>'
+  openModal('<h2>Rename player</h2><p class="muted">Rename this player.</p>'
     +'<p><label>Name <input type="text" id="rename-text" value="'+esc(r.name)+'" maxlength="30"></label></p>'
     +'<div class="row" style="margin-top:8px"><button class="primary" data-save-rename="'+i+'">Save name</button><button class="ghost" data-close>Cancel</button></div>');
 }
@@ -1109,6 +1163,11 @@ function removePlayer(i){
   S.message=name+' removed from the roster.';
   closeModal(); render();
   saveRosterAuto();
+}
+function openStartingLineup(){
+  const line=S.startingLineup||S.lineup;
+  const keep=S.lineup; S.lineup=[...line]; const field=fieldHtml({readonly:true}); S.lineup=keep;
+  openModal('<h2>Starting lineup</h2>'+field+'<div class="pin-bottom"><button class="ghost" data-close>Close</button></div>');
 }
 function openShortChooser(){
   const opts=POSITIONS.map((p,i)=>S.removedPositions.includes(i)?'':'<button data-remove-pos="'+i+'">Remove '+p+'</button>').join('');
@@ -1134,17 +1193,13 @@ function render(){
   const err=S.error?'<div class="error" role="alert">'+esc(S.error)+'</div>':'';
   S.message=''; S.error='';
   let html=msg+err;
-  if (SB.configured && SB.authUser) {
-    html += '<div class="row spread"><span class="muted small">Signed in as ' + esc(SB.authUser.email || 'coach') + '</span>'
-      + '<button class="small ghost" data-signout>Sign out</button></div>';
-  }
   // Supabase status banners (never block the game).
   if(SB.backendError) html+='<div class="error" role="alert">'+esc(SB.backendError)+'</div>';
   if(SB.offline) html+='<div class="error" role="alert">Offline — changes will sync when signal returns.</div>';
   if(SB.conflict) html+='<div class="banner">Updated by the other coach — the live game changed on another phone.'
     +'<div class="row" style="margin-top:8px"><button data-conflict-reload>Reload their version</button><button data-conflict-keep>Keep mine</button></div></div>';
   if(SB.role==='viewer' && SB.liveId) html+='<div class="banner">View-only — you are watching the driver’s game live (code '+esc(SB.liveCode)+').'
-    +'<div class="row" style="margin-top:8px"><button data-takeover-live>Take over as driver</button><button data-copy-live-link>Copy live link</button></div></div>';
+    +'<div class="row" style="margin-top:8px"><button data-takeover-live>Take over as driver</button></div></div>';
   // Driver: sync the live snapshot (debounced) after any render that
   // follows an action. Remote applies set SB.applyingRemote and skip.
   if(SB.role==='driver' && SB.liveId && !SB.applyingRemote && !SB.conflict && !SB.offline && (S.screen==='live' || S.screen==='halftime')) scheduleLiveSync(false);
@@ -1153,42 +1208,71 @@ function render(){
   else if(S.screen==='live') html+=liveHtml();
   else if(S.screen==='halftime') html+=halftimeHtml();
   else if(S.screen==='finished') html+=finishedHtml();
-  else if(S.screen==='snapshot') html+=snapshotHtml();
   mainEl.innerHTML=html;
+  // Finished game opens scrolled to the top so the score is visible
+  // right away (private app behaviour).
+  if(S.screen==='finished'){ try{ window.scrollTo(0,0); }catch(e){} }
 }
 function setupHtml(){
-  const filled=S.lineup.filter(x=>x!=null).length;
-  const lastBtn=S.lastLineup?'<button data-last-lineup>Use last game’s lineup</button>':'';
-  const prefBtn=S.preferredLineup?'<button data-use-preferred>Use preferred lineup</button>':'';
+  const lastBtn=S.lastLineup?'<button data-last-lineup>Use last game\u2019s lineup</button>':'';
+  // Mid-game Edit lineup: this setup screen is the editor — "Return to
+  // live" goes back without resetting the clock, score, goals, or
+  // minutes. Fresh setup instead goes through Review & start.
+  if (S.editingLive) {
+    return '<section aria-label="Edit lineup">'
+      +'<div class="field-wrap">'+fieldHtml({})+'</div>'
+      +'<p class="muted" style="text-align:center">Tap a spot to choose a player</p>'
+      +'<div class="row"><button data-auto>Auto-generate lineup</button><button data-refresh>Refresh lineup</button><button class="primary grow" data-back-live>Return to live game</button></div>'
+      +'<details><summary>Attendance ('+S.roster.filter(r=>r.present).length+' present)</summary><div class="attend">'
+      +S.roster.map((r,i)=>'<button data-attend="'+i+'" class="'+(r.present?'':'absent')+'">'+esc(r.name)+(r.present?'':' — absent')+'</button>').join('')
+      +'</div><p class="muted">Marking a bench player absent leaves the starting seven untouched. Marking a starter absent clears only their spot.</p></details>'
+      +'<details><summary>Team &amp; positions</summary>'
+      +((rosterSourceLabel()||SB.rosterError)?'<p class="muted">'+esc(rosterSourceLabel())+(SB.rosterError?' '+esc(SB.rosterError):'')+'</p>':'')
+      +teamRowsHtml()
+      +'<div class="row"><button data-add-player>Add player</button>'
+      +(SB.configured && SB.authUser?'<button data-save-roster>Save roster</button>':'')
+      +'</div></details>'
+      +'</section>';
+  }
+  const tabs=[['lineup','Lineup'],['roster','Roster'],['settings','Settings'],['history','History']];
+  let body='';
+  if(S.setupTab==='lineup'){
+    const bench=S.roster.map((r,i)=>i).filter(i=>!S.lineup.includes(i)&&S.roster[i].present);
+    body='<div class="card"><h3>Join a live game</h3><p class="muted">Enter the 4-letter game code from the driver\u2019s phone.</p>'
+      +'<div class="row"><input type="text" id="join-code" placeholder="Game code" maxlength="4" autocapitalize="characters" autocomplete="off" style="width:110px;text-transform:uppercase"><button class="primary" data-join-live>Join live game</button></div></div>'
+      +'<div class="card"><div class="row spread"><span><strong>Preferred lineup</strong> <span class="muted">&middot; '+(S.preferredLineup?'Ready':'Not set')+'</span></span><button class="small" data-manage-preferred>Manage</button></div>'
+      +(lastBtn?'<div class="row" style="margin-top:8px">'+lastBtn+'</div>':'')
+      +'</div>'
+      +'<div class="row"><button class="primary grow" data-auto>Refresh lineup</button><button class="primary grow" data-review>Review &amp; start</button><button class="ghost small" data-clear-lineup>Clear</button></div>'
+      +'<div class="field-wrap">'+fieldHtml({})+'</div>'
+      +'<p class="muted" style="text-align:center">Tap a spot to choose a player</p>'
+      +'<p class="muted"><strong>OPENING BENCH</strong> &mdash; '+(bench.length?bench.map(i=>esc(S.roster[i].name)).join(', '):'none')+'</p>';
+  } else if(S.setupTab==='roster'){
+    body='<h2>Attendance &amp; positions</h2><p class="muted">Tap positions to toggle &middot; keep at least one</p>'
+      +((rosterSourceLabel()||SB.rosterError)?'<p class="muted">'+esc(rosterSourceLabel())+(SB.rosterError?' '+esc(SB.rosterError):'')+'</p>':'')
+      +teamRowsHtml()
+      +'<div class="row"><button data-add-player>Add player</button>'
+      +(SB.configured && SB.authUser?'<button data-save-roster>Save roster</button>':'')
+      +'</div>'
+      +'<p class="muted">Notes are private.</p>';
+  } else if(S.setupTab==='settings'){
+    body='<h2>Match settings</h2>'
+      +'<div class="card">'
+      +'<p><label>Match minutes <input type="number" data-setting="matchMinutes" value="'+S.settings.matchMinutes+'" min="10" max="120"></label></p>'
+      +'<p><label>Substitution cadence (min) <input type="number" data-setting="cadence" value="'+S.settings.cadence+'" min="1" max="30"></label></p>'
+      +'<p><label>Subs per rotation <input type="number" data-setting="subsPerRotation" value="'+S.settings.subsPerRotation+'" min="1" max="6"></label></p>'
+      +'<p><label>Fair-time threshold (min) <input type="number" data-setting="fairTimeThreshold" value="'+S.settings.fairTimeThreshold+'" min="1" max="20"></label></p>'
+      +'<p><label><input type="checkbox" data-setting-check="countGoalieTime" '+(S.settings.countGoalieTime?'checked':'')+'> Count goalie time toward total game time</label><br><span class="muted">Off by default: totals count only non-goalie minutes. Goalie minutes are still tracked and shown.</span></p>'
+      +'<p><label>Team name <input type="text" data-setting-text="teamName" value="'+esc(S.teamName)+'"></label></p>'
+      +(SB.authUser?'<p class="muted">Signed in as '+esc(SB.authUser.email||'coach')+'</p><div class="row"><button class="ghost" data-signout>Sign out</button></div>':'')
+      +'</div>';
+  } else {
+    body=historyHtml();
+  }
   return '<section aria-label="Setup">'
-    +'<div class="field-wrap">'+fieldHtml({})+'</div>'
-    +'<p class="muted" style="text-align:center">'+filled+' of 7 spots filled &middot; tap a spot to choose a player</p>'
-    +'<div class="row"><button class="primary" data-auto>Auto-generate lineup</button><button data-refresh>Refresh lineup</button>'
-    +lastBtn+prefBtn+'<button data-save-preferred>Save as preferred</button><button data-review>Review &amp; start →</button></div>'
-    +'<details><summary>Attendance ('+S.roster.filter(r=>r.present).length+' present)</summary><div class="attend">'
-    +S.roster.map((r,i)=>'<button data-attend="'+i+'" class="'+(r.present?'':'absent')+'">'+esc(r.name)+(r.present?'':' — absent')+'</button>').join('')
-    +'</div><p class="muted">Marking a bench player absent leaves the starting seven untouched. Marking a starter absent clears only their spot.</p></details>'
-    +'<details><summary>Match settings</summary>'
-    +'<p><label>Match minutes <input type="number" data-setting="matchMinutes" value="'+S.settings.matchMinutes+'" min="10" max="120"></label></p>'
-    +'<p><label>Substitution cadence (min) <input type="number" data-setting="cadence" value="'+S.settings.cadence+'" min="1" max="30"></label></p>'
-    +'<p><label>Subs per rotation <input type="number" data-setting="subsPerRotation" value="'+S.settings.subsPerRotation+'" min="1" max="6"></label></p>'
-    +'<p><label>Fair-time threshold (min) <input type="number" data-setting="fairTimeThreshold" value="'+S.settings.fairTimeThreshold+'" min="1" max="20"></label></p>'
-    +'<p><label><input type="checkbox" data-setting-check="countGoalieTime" '+(S.settings.countGoalieTime?'checked':'')+'> Count goalie time toward total game time</label><br><span class="muted">Off by default: totals count only non-goalie minutes. Goalie minutes are still tracked and shown.</span></p>'
-    +'<p><label>Team name <input type="text" data-setting-text="teamName" value="'+esc(S.teamName)+'"></label></p></details>'
-    +'<details><summary>Team &amp; positions</summary>'
-    +'<p class="muted">'+esc(rosterSourceLabel())+(SB.rosterError?' '+esc(SB.rosterError):'')+'</p>'
-    +teamRowsHtml()
-    +'<div class="row"><button data-add-player>Add player</button>'
-    +(SB.configured && SB.authUser?'<button data-save-roster>Save roster to Supabase</button>':'')
-    +'</div>'
-    +'<p class="muted">Tap Positions on a player to edit their preferred positions; Rename to change a name. Notes are private and never go in links. Renames, adds, removes and position changes save to Supabase automatically when signed in — except a roster from a texted link, which only saves when you tap “Save roster to Supabase”.</p></details>'
-    +'<div class="card"><h3>Text setup to coach</h3><p class="muted">Sends the setup (roster, preferences, attendance, lineup) as a compact link. The other coach imports it on their phone.</p>'
-    +'<div class="row"><button data-export-setup>Copy setup link</button><button data-sms-setup>Text setup (SMS)</button></div>'
-    +'<p class="small"><label>Or copy the link text here:</label><textarea id="link-out" readonly placeholder="Link appears here after Copy"></textarea></p></div>'
-    +'<div class="card"><h3>Import texted setup or game</h3><p class="muted">Paste a link or code the other coach texted you. Import adopts the link’s roster.</p>'
-    +'<textarea id="link-in" placeholder="Paste link, #s=… or #g=… here"></textarea>'
-    +'<div class="row" style="margin-top:8px"><button data-import>Import</button></div></div>'
-    +(S.history.length?'<div class="card"><h3>History (this session)</h3>'+historyHtml()+'</div>':'')
+    +'<div class="team-head"><h2>\uD83D\uDD25\u26BD '+esc(S.teamName)+'</h2></div>'
+    +'<div class="tabs" role="tablist">'+tabs.map(([k,label])=>'<button role="tab" aria-selected="'+(S.setupTab===k)+'" data-setup-tab="'+k+'">'+label+'</button>').join('')+'</div>'
+    +body
     +'</section>';
 }
 function reviewHtml(){
@@ -1198,69 +1282,67 @@ function reviewHtml(){
     +'<div class="row"><button class="primary grow" data-start-game>Start game</button><button data-back-setup>Back to setup</button></div></section>';
 }
 function liveHtml(){
-  const tabs=[['field','Field'],['minutes','Minutes'],['team','Team'],['history','History']];
+  const tabs=[['actions','Actions'],['minutes','Minutes'],['team','Team'],['positions','Positions']];
   let body='';
-  if(S.liveTab==='field'){
-    body='<div class="field-wrap">'+fieldHtml({})+'</div>'
-      +(S.swapPair.length?'<div class="banner">Swap staged: '+esc(S.roster[S.lineup[S.swapPair[0]]].name)+' ↔ '+esc(S.roster[S.lineup[S.swapPair[1]]].name)+' — tap Swap to run it now.</div>':'')
+  if(S.liveTab==='actions'){
+    body='<div class="field-wrap">'+fieldHtml({showMinutes:true})+'</div>'
+      +(S.swapPair.length?'<div class="banner">Swap staged: '+esc(S.roster[S.lineup[S.swapPair[0]]].name)+' \u2194 '+esc(S.roster[S.lineup[S.swapPair[1]]].name)+' — tap Swap to run it now.</div>':'')
       +(S.selection?'<p class="muted">Selected: '+esc(S.roster[S.selection.player].name)+' — tap '+(S.selection.kind==='out'?'a bench player to bring on, or another field player to stage a swap.':'a field player to replace.')+'</p>':'')
       +(S.swapPair.length?'<div class="row"><button class="primary" data-do-swap>Swap</button><button class="ghost" data-cancel-swap>Cancel swap</button></div>':'')
-      +'<h3>Bench — tap a player to start a sub</h3>'+benchHtml()
-      +'<h3>Next change</h3>'
-      +(S.queue.length?S.queue.map((q,qi)=>'<div class="queue-item"><span>↓ '+esc(S.roster[q.out].name)+' ('+POSITIONS[q.pos]+')</span><span class="arrow">→</span><span>↑ '+esc(S.roster[q.in].name)+'</span><button class="small" data-unqueue="'+qi+'">Remove</button></div>').join('')
-        +'<div class="row"><button class="primary" data-apply>Apply ('+S.queue.length+')</button><button data-clear-queue>Clear queue</button><button data-suggest>Suggest rotation</button></div>'
+      +'<div class="bench-head"><h3>Bench</h3><span class="muted small">'+(S.queue.length?S.queue.length+' queued &middot; tap field or bench to add another':'tap a player to start a sub')+'</span></div>'+benchHtml()
+      +(S.queue.length
+        ? '<div class="row" style="margin-top:10px"><button class="apply" data-apply>Apply '+S.queue.length+' now</button></div>'
+          +'<h3>Next change</h3><p class="muted">'+S.queue.length+' ready &middot; <button class="small ghost" data-clear-queue>Clear</button></p>'
+          +S.queue.map((q,qi)=>'<div class="queue-item"><span class="q-num">'+(qi+1)+'</span><span>\u2193 '+esc(S.roster[q.out].name)+' ('+POSITIONS[q.pos]+')</span><span class="arrow">\u2192</span><span>\u2191 '+esc(S.roster[q.in].name)+'</span><button class="small" data-unqueue="'+qi+'">Remove</button></div>').join('')
+          +'<div class="row"><button data-suggest>Suggest rotation</button></div>'
         :'<p class="muted">No substitutions queued. Tap a field player, then a bench player — or a bench player first, then a field player.</p><div class="row"><button data-suggest>Suggest rotation</button></div>')
       +'<div class="row"><button data-edit-lineup>Edit lineup</button>'
       +(S.shortMode?'<button data-full-strength>Return to full strength (7v7)</button>':'<button data-play-short>Play short (6v7)</button>')
-      +'<button data-edit-goals>Edit goals</button></div>'
-      +'<div id="live-minutes-inline"><h3>Minutes</h3>'+minutesRowsHtml()+'</div>';
+      +'<button data-edit-goals>Edit goals</button></div>';
   } else if(S.liveTab==='minutes'){
-    body='<h2>Minutes — actual &amp; projected</h2><p class="muted">Fair share: '+fmtMin(fairShareSec())+' min &middot; threshold ±'+S.settings.fairTimeThreshold+' min &middot; '+(S.settings.countGoalieTime?'goalie time counts':'goalie time excluded from totals')+'.</p>'
+    body='<h2>Minutes — actual &amp; projected</h2><p class="muted">Fair share: '+fmtMin(fairShareSec())+' min &middot; threshold \u00b1'+S.settings.fairTimeThreshold+' min &middot; '+(S.settings.countGoalieTime?'goalie time counts':'goalie time excluded from totals')+'.</p>'
       +'<div id="live-minutes-inline">'+minutesRowsHtml()+'</div>'
       +'<h3>Goals</h3>'+(S.goals.length?S.goals.map(g=>'<p>'+esc(goalLabel(g))+' ('+(g.side==='us'?'US':'THEM')+')</p>').join(''):'<p class="muted">No goals yet.</p>')
       +'<div class="row"><button data-edit-goals>Edit goals</button></div>';
   } else if(S.liveTab==='team'){
-    body='<h2>Team — player status</h2><p class="muted">Alphabetical. Notes are private and never go in links.</p>'+teamRowsHtml()
+    body='<h2>Team — player status</h2><p class="muted">Alphabetical. Notes are private.</p>'+teamRowsHtml()
       +'<h3>Starting lineup (read-only)</h3><div class="field-wrap" style="position:static">'+fieldHtml({readonly:true})+'</div>';
   } else {
-    body='<h2>History (this session)</h2>'+historyHtml();
+    body='<h2>Positions</h2><p class="muted">Tap positions to toggle &middot; keep at least one. Preferences guide, never block.</p>'+positionsRowsHtml();
   }
-  const liveCard = SB.role==='driver' && SB.liveId
-    ? '<div class="card"><h3>Live — you are driving</h3><p class="muted">Game code <strong>'+esc(SB.liveCode)+'</strong> — the other coach opens the live link below and watches view-only.</p><div class="row"><button data-copy-live-link>Copy live link</button></div></div>'
-    : (SB.configured && !SB.liveId && !SB.role
-      ? '<div class="card"><h3>Live sync</h3><p class="muted">Backend is configured but this game was started in-memory only (Supabase was unreachable at kickoff, or this is a snapshot takeover). History will still save on End game.</p></div>'
-      : '');
-  return '<section aria-label="Live game">' + liveCard
-    +'<div class="scoreboard"><div class="clock" id="clock">'+fmtClock(S.elapsed)+'</div>'
-    +'<div class="score"><span class="team-label">US</span> <button data-score="us-minus" aria-label="US minus">−</button> '+S.ourScore+' – '+S.theirScore+' <button data-score="them-plus" aria-label="Them plus">+</button> <span class="team-label">THEM</span></div>'
-    +'<div class="row" style="justify-content:center"><button data-score="us-plus">US +</button><button data-score="them-minus">THEM −</button></div>'
-    +'<div class="sub">'+(S.running?'Clock running':'Clock paused')+' &middot; '+S.settings.matchMinutes+' min &middot; '+(S.shortMode?'6v7 — playing short':'7v7')+'</div>'
-    +'<div class="clock-row"><button data-pause>'+(S.running?'Pause':'Resume')+'</button><button data-plus2>+2:00</button><button data-halftime>Halftime</button><button data-end>End game</button></div>'
-    +(S.undoStack.length?'<div class="clock-row"><button data-undo>Undo ('+esc(S.undoStack[S.undoStack.length-1].label)+')</button></div>':'')
+  return '<section aria-label="Live game">'
+    +'<div class="scoreboard"><div class="score-row">'
+    +'<div class="side"><button data-score="us-minus" aria-label="US minus">−</button><div class="score-col"><span class="team-label">US</span><span class="score-num">'+S.ourScore+'</span></div><button data-score="us-plus" aria-label="US plus">+</button></div>'
+    +'<div class="clock-mid"><div class="clock" id="clock">'+fmtClock(S.elapsed)+'</div><div class="clock-controls"><button class="pill" data-plus2>+2:00</button><button class="pill pause" data-pause>'+(S.running?'\u275a\u275a PAUSE':'RESUME')+'</button></div></div>'
+    +'<div class="side"><button data-score="them-minus" aria-label="Them minus">−</button><div class="score-col"><span class="team-label">THEM</span><span class="score-num">'+S.theirScore+'</span></div><button data-score="them-plus" aria-label="Them plus">+</button></div>'
+    +'</div></div>'
+    +'<div class="game-actions"><button class="linklike" data-halftime>Halftime</button><span aria-hidden="true">&middot;</span><button class="linklike" data-end>End game</button>'
+    +(S.undoStack.length?'<span aria-hidden="true">&middot;</span><button class="linklike" data-undo>Undo '+esc(S.undoStack[S.undoStack.length-1].label)+'</button>':'')
     +'</div>'
     +'<div class="tabs" role="tablist">'+tabs.map(([k,label])=>'<button role="tab" aria-selected="'+(S.liveTab===k)+'" data-tab="'+k+'">'+label+'</button>').join('')+'</div>'
     +body
-    +'<div class="card"><h3>Text game to coach</h3><p class="muted">Frozen snapshot at the current clock — text a fresh link for updates.</p>'
-    +'<div class="row"><button data-export-game>Copy game link</button><button data-sms-game>Text game (SMS)</button></div>'
-    +'<p class="small"><textarea id="link-out" readonly placeholder="Link appears here after Copy"></textarea></p></div>'
-    +'<div class="row"><button class="ghost grow" data-text-coach>Text coach…</button></div>'
+    +(SB.role==='driver'&&SB.liveId?'<p class="muted small" style="text-align:center">Game code <strong>'+esc(SB.liveCode)+'</strong> — the other coach enters this code on setup to join.</p>':'')
+    +'<div class="row"><button class="ghost" data-starting-lineup>Starting lineup</button></div>'
     +'</section>';
 }
 function halftimeHtml(){
   const halfBoundary=S.settings.matchMinutes*30;
   const snapNeeded=S.elapsed!==halfBoundary;
   if(!S.plannedLineup) S.plannedLineup=autoLineup(true);
-  const firstHalf=S.roster.map((r,i)=>i).filter(i=>r.present)
+  const firstHalf=S.roster.map((r,i)=>i).filter(i=>S.roster[i].present)
     .sort((a,b)=>totalSec(a)-totalSec(b))
     .map(i=>'<div class="mrow"><span class="name">'+esc(S.roster[i].name)+'</span><span class="nums">'+fmtMin(totalSec(i))+' min</span></div>').join('');
-  return '<section aria-label="Halftime planner"><h2>Halftime</h2>'
-    +'<p>Score: <strong>US '+S.ourScore+' – '+S.theirScore+' THEM</strong> &middot; clock '+fmtClock(S.elapsed)+' (paused)</p>'
-    +'<p class="muted">Second-half plan favours players with fewer first-half minutes. Tap any spot to change it.</p>'
+  const filled=S.plannedLineup.filter(x=>x!=null).length;
+  return '<section aria-label="Halftime planner" class="halftime-head"><span class="badge-pill">HALFTIME</span>'
+    +'<h2>Reset the balance.</h2>'
+    +'<p class="muted">The suggestion favors players with fewer first-half minutes, then maps the next rotation.</p>'
+    +'<div class="two-col">'+firstHalf+'</div>'
+    +'<div class="row"><button data-halftime-prefs>Position preferences</button></div>'
+    +'<div class="row" style="margin-top:8px"><button class="primary grow" data-plan-refresh>Refresh lineup</button><span class="muted">Lineup '+(S.planCount||1)+'</span></div>'
+    +'<h3>Second-half '+(S.shortMode?'6v7':'7v7')+' lineup</h3><p class="muted">'+filled+'/'+fieldCount()+' filled &middot; tap a player to change</p>'
     +'<div class="field-wrap" style="position:static">'
     + (function(){ const keep=S.lineup; S.lineup=S.plannedLineup; const h=fieldHtml({}); S.lineup=keep; return h; })()
     +'</div>'
-    +'<div class="row"><button data-plan-refresh>Refresh plan</button><button data-plan-use>Use this plan</button></div>'
-    +'<h3>First-half minutes</h3>'+firstHalf
     +'<div class="row"><button class="primary grow" data-start-second>Start second half</button>'
     +(snapNeeded?'<button data-snap-clock>Set clock to '+fmtClock(halfBoundary)+'</button>':'')
     +'<button data-back-live>Back to live (no change)</button></div></section>';
@@ -1272,25 +1354,11 @@ function finishedHtml(){
   return '<section aria-label="Finished game"><h2>Full time — US '+last.ourScore+' – '+last.theirScore+' THEM</h2>'
     +'<div class="field-wrap" style="position:static">'+field+'</div>'
     +'<p>'+(last.goals.length?'Scorers: '+last.goals.map(goalLabel).join(', '):'No goals recorded.')+'</p>'
-    +'<div class="row"><button class="primary" data-csv-last>Download CSV</button><button data-editgoals-last>Edit goals</button><button data-new-game>Start new game</button></div>'
+    +'<div class="row"><button class="primary" data-close-history>Close and view history</button><button data-csv-last>Download CSV</button><button data-editgoals-last>Edit goals</button></div>'
+    +'<div class="row"><button data-new-game>Start new game</button><button class="danger" data-discard-game>Discard this game</button></div>'
     +'<h3>Minutes</h3>'+last.players.map(p=>'<div class="mrow"><span class="name">'+esc(p.name)+'</span><span class="nums">'+fmtMin(p.seconds)+' min'+(p.gkSeconds?' (GK '+fmtMin(p.gkSeconds)+')':'')+(p.goals?' ⚽ '+p.goals:'')+'</span></div>').join('')
-    +'<h3>History (this session)</h3>'+historyHtml()+'</section>';
+    +'<h3>History</h3>'+historyHtml()+'</section>';
 }
-function snapshotHtml(){
-  const sn=S.snapshot; if(!sn) return '<p>No snapshot loaded.</p>';
-  const keep=S.lineup; S.lineup=sn.lineup; const field=fieldHtml({readonly:true}); S.lineup=keep;
-  const bench=S.roster.map((r,i)=>i).filter(i=>!sn.lineup.includes(i)&&r.present).map(i=>esc(S.roster[i].name)).join(', ');
-  const mins=sn.minutesTenths.map((t,i)=>'<div class="mrow"><span class="name">'+esc(S.roster[i].name)+'</span><span class="nums">'+(t/10).toFixed(1)+' min'+(S.roster[i].tired?' ● tired':'')+'</span></div>').join('');
-  return '<section aria-label="Snapshot"><div class="banner">Snapshot · as of '+fmtClock(sn.elapsed)+' — not live. Ask for a fresh link for updates.</div>'
-    +'<h2>'+esc(S.teamName)+' — US '+sn.ourScore+' – '+sn.theirScore+' THEM</h2>'
-    +'<p class="muted">'+sn.matchMinutes+' min match &middot; '+sn.lineup.filter(x=>x!=null).length+' on field</p>'
-    +field
-    +'<h3>Bench</h3><p>'+(bench||'—')+'</p>'
-    +'<h3>Goals</h3><p>'+(S.snapshotGoals.length?S.snapshotGoals.map(goalLabel).join(', '):'None recorded.')+'</p>'
-    +'<h3>Minutes</h3>'+mins
-    +'<div class="row"><button class="primary" data-takeover>Take over — open halftime planner</button><button data-back-setup>Back</button></div></section>';
-}
-
 /* ---------- Game actions ---------- */
 function suggestRotation(){
   const tiredOn=onField().filter(x=>S.roster[x.player].tired);
@@ -1334,26 +1402,50 @@ async function finishGame(){
   }));
   const game={date:new Date().toLocaleDateString(), teamName:S.teamName,
     ourScore:S.ourScore, theirScore:S.theirScore, lineup:[...(S.startingLineup||S.lineup)],
-    players, goals:[...S.goals]};
+    players, goals:[...S.goals], playedSeconds:S.elapsed};
   S.history.push(game);
-  S.lastLineup=[...S.lineup];
+  // "Use last game's lineup" loads the previous completed game's
+  // STARTING lineup, not the end-of-game lineup.
+  S.lastLineup=[...(S.startingLineup||S.lineup)];
   S.screen='finished';
   render();
   // Durable record first: history insert, then mark the live row finished.
   await saveHistoryGame(game);
   await finishLiveGame();
-  if(game.backendId) S.message='Game saved to Supabase history.';
-  else if(SB.configured) S.message='Game kept in-memory only — Supabase unreachable. Download the CSV as a backup.';
+  if(game.backendId) S.message='Game saved to history.';
+  else if(SB.configured) S.message='Game saved on this device only — download the CSV as a backup.';
   render();
 }
 function startNewGame(){
   const keepHistory=S.history, keepLast=S.lastLineup, keepPref=S.preferredLineup;
+  const keepTeam=S.teamName, keepSettings={...S.settings};
   const roster=S.roster.map(r=>({...r, tired:false}));
   resetLiveSession();
   S=freshState();
   S.history=keepHistory; S.lastLineup=keepLast; S.preferredLineup=keepPref; S.roster=roster;
-  S.screen='setup';
+  S.teamName=keepTeam; S.settings=keepSettings;
+  S.screen='setup'; S.setupTab='lineup';
   render();
+}
+/* "Close and view history" (private finished screen): back to setup
+   with history, roster, settings, team name, and setup lineup edits
+   preserved — only the short-handed flags are cleared, so setup
+   always opens at full strength. */
+function closeFinishedGame(){
+  S.removedPositions=[]; S.shortMode=false; S.editingLive=false;
+  S.screen='setup'; S.setupTab='history';
+  render();
+}
+async function discardFinishedGame(){
+  const last=S.history[S.history.length-1];
+  if(!last) return;
+  openConfirm({title:'Discard this game?', body:'It will be removed from history. Roster, settings, and earlier games are kept.', confirmLabel:'Discard game', danger:true, onConfirm:async ()=>{
+    await discardHistoryGame(last);
+    // The discarded game's lineup must not be offered as "last lineup".
+    S.lastLineup = S.history.length && S.history[S.history.length-1].lineup
+      ? [...S.history[S.history.length-1].lineup] : null;
+    startNewGame();
+  }});
 }
 function startSecondHalf(){
   if(S.plannedLineup){
@@ -1361,14 +1453,14 @@ function startSecondHalf(){
     S.lineup=[...S.plannedLineup];
     S.plannedLineup=null;
   }
-  S.halftimeDone=true; S.screen='live'; S.liveTab='field'; S.running=true;
+  S.halftimeDone=true; S.screen='live'; S.liveTab='actions'; S.running=true;
   S.message='Second half started.';
   render();
 }
 
 /* ---------- Events (delegation) ---------- */
 document.addEventListener('click', async (e)=>{
-  const t=e.target.closest('[data-spot],[data-bench],[data-tab],[data-pick],[data-scorer],[data-step],[data-close],[data-clear-spot],[data-save-note],[data-pref],[data-remove-pos],[data-goal-minus],[data-goal-plus],[data-goal-del],[data-tired],[data-note],[data-prefs],[data-rename],[data-save-rename],[data-add-player],[data-save-add-player],[data-remove-player],[data-save-roster],[data-attend],[data-unqueue],[data-csv],[data-editgoals],[data-auto],[data-refresh],[data-review],[data-back-setup],[data-start-game],[data-pause],[data-plus2],[data-halftime],[data-end],[data-undo],[data-apply],[data-clear-queue],[data-suggest],[data-edit-lineup],[data-play-short],[data-full-strength],[data-edit-goals],[data-do-swap],[data-cancel-swap],[data-plan-refresh],[data-plan-use],[data-start-second],[data-snap-clock],[data-back-live],[data-takeover],[data-takeover-live],[data-copy-live-link],[data-conflict-reload],[data-conflict-keep],[data-new-game],[data-csv-last],[data-editgoals-last],[data-export-setup],[data-sms-setup],[data-export-game],[data-sms-game],[data-import],[data-text-coach],[data-last-lineup],[data-use-preferred],[data-save-preferred],[data-score],[data-signin],[data-signout]');
+  const t=e.target.closest('[data-spot],[data-bench],[data-tab],[data-pick],[data-scorer],[data-step],[data-close],[data-clear-spot],[data-save-note],[data-pref],[data-remove-pos],[data-goal-minus],[data-goal-plus],[data-goal-del],[data-tired],[data-note],[data-prefs],[data-rename],[data-save-rename],[data-add-player],[data-save-add-player],[data-remove-player],[data-save-roster],[data-attend],[data-unqueue],[data-csv],[data-editgoals],[data-auto],[data-refresh],[data-review],[data-back-setup],[data-start-game],[data-pause],[data-plus2],[data-halftime],[data-end],[data-undo],[data-apply],[data-clear-queue],[data-suggest],[data-edit-lineup],[data-play-short],[data-full-strength],[data-edit-goals],[data-do-swap],[data-cancel-swap],[data-plan-refresh],[data-plan-use],[data-start-second],[data-snap-clock],[data-back-live],[data-takeover-live],[data-conflict-reload],[data-conflict-keep],[data-new-game],[data-csv-last],[data-editgoals-last],[data-confirm-yes],[data-last-lineup],[data-use-preferred],[data-save-preferred],[data-score],[data-signin],[data-signout],[data-close-history],[data-discard-game],[data-starting-lineup],[data-leaving],[data-arrived],[data-setup-tab],[data-details],[data-season-csv],[data-clear-lineup],[data-clear-preferred],[data-manage-preferred],[data-more],[data-pref-inline],[data-halftime-prefs],[data-join-live]');
   if(!t) return;
   const d=t.dataset;
 
@@ -1387,21 +1479,15 @@ document.addEventListener('click', async (e)=>{
   // View-only phone: block every edit action. Allowed: switching tabs,
   // closing modals, copying links, viewing CSVs, and taking over.
   if(SB.role==='viewer' && SB.liveId){
-    const allowed=new Set(['tab','close','takeoverLive','copyLiveLink','exportGame','smsGame','csv','csvLast','textCoach','backSetup','conflictReload','conflictKeep']);
+    const allowed=new Set(['tab','setupTab','close','takeoverLive','joinLive','confirmYes','csv','csvLast','seasonCsv','details','halftimePrefs','backSetup','conflictReload','conflictKeep']);
     const keys=Object.keys(d);
     if(keys.length && !keys.some(k=>allowed.has(k))){
       S.message='View-only — the driver is driving this game. Take over to make changes.';
       render(); return;
     }
   }
-  if(d.copyLiveLink!==undefined){
-    const url=SB.liveCode?liveGameUrl(SB.liveCode):'';
-    try{ await navigator.clipboard.writeText(url); S.message='Live link copied — the other coach opens it to watch view-only.'; }
-    catch(e){ S.message='Live link: '+url; }
-    render(); return;
-  }
   if(d.takeoverLive!==undefined){
-    if(confirm('Take over as driver? You will drive this game; the other phone becomes view-only.')) await takeOverLive();
+    openConfirm({title:'Take over as driver?', body:'You will drive this game; the other phone becomes view-only.', confirmLabel:'Take over', onConfirm:async ()=>{ await takeOverLive(); }});
     return;
   }
   if(d.conflictReload!==undefined){
@@ -1419,6 +1505,16 @@ document.addEventListener('click', async (e)=>{
   }
 
   if(d.close!==undefined){ closeModal(); return; }
+  if(d.confirmYes!==undefined){
+    const fn=confirmAction; confirmAction=null; closeModal();
+    if(fn) await fn();
+    return;
+  }
+  if(d.joinLive!==undefined){
+    const code=((($('#join-code')||{}).value||'').trim().toUpperCase());
+    if(!code){ S.error='Enter the 4-letter game code first.'; render(); return; }
+    await joinLiveGame(code); return;
+  }
   if(d.spot!==undefined){
     const pos=+d.spot;
     if(S.screen==='halftime'){ openPlayerPicker(pos); return; }
@@ -1466,6 +1562,14 @@ document.addEventListener('click', async (e)=>{
     openPrefsEditor(i); render(); saveRosterAuto(); return;
   }
   if(d.note!==undefined){ openNoteEditor(+d.note); return; }
+  if(d.prefInline!==undefined){
+    const i=+d.player, pp=d.prefInline, r=S.roster[i];
+    if(r.prefs.includes(pp)){
+      if(r.prefs.length<=1){ S.error='Keep at least one preferred position.'; render(); return; }
+      r.prefs=r.prefs.filter(x=>x!==pp);
+    } else r.prefs=[...r.prefs,pp];
+    render(); saveRosterAuto(); return;
+  }
   if(d.prefs!==undefined){ openPrefsEditor(+d.prefs); return; }
   if(d.rename!==undefined){ openRenameEditor(+d.rename); return; }
   if(d.saveRename!==undefined){
@@ -1483,16 +1587,16 @@ document.addEventListener('click', async (e)=>{
   }
   if(d.removePlayer!==undefined){
     const i=+d.removePlayer;
-    if(confirm('Remove '+S.roster[i].name+' from the roster? Their minutes and any lineup spot are cleared.')) removePlayer(i);
+    openConfirm({title:'Remove '+S.roster[i].name+'?', body:'Their minutes and any lineup spot are cleared.', confirmLabel:'Remove player', danger:true, onConfirm:()=>{ removePlayer(i); }});
     return;
   }
   if(d.saveRoster!==undefined){
     const ok=await saveRosterToBackend();
-    S.message=ok?'Roster saved to Supabase.':'Could not save the roster — see the note on the Setup screen.';
+    S.message=ok?'Roster saved.':'Could not save the roster — try again.';
     render(); return;
   }
   if(d.tired!==undefined){
-    const i=+d.tired; S.roster[i].tired=!S.roster[i].tired; render(); return;
+    const i=+d.tired; S.roster[i].tired=!S.roster[i].tired; closeModal(); render(); return;
   }
   if(d.attend!==undefined){
     const i=+d.attend; S.roster[i].present=!S.roster[i].present;
@@ -1503,6 +1607,17 @@ document.addEventListener('click', async (e)=>{
     render(); return;
   }
   if(d.tab!==undefined){ S.liveTab=d.tab; render(); return; }
+  if(d.setupTab!==undefined){ S.setupTab=d.setupTab; render(); return; }
+  if(d.details!==undefined){ const hi=+d.details; S.expandedHistory[hi]=!S.expandedHistory[hi]; render(); return; }
+  if(d.seasonCsv!==undefined){ downloadCsv('full-season.csv', seasonCsv()); return; }
+  if(d.clearLineup!==undefined){ S.lineup=[null,null,null,null,null,null,null]; S.removedPositions=[]; S.shortMode=false; render(); return; }
+  if(d.managePreferred!==undefined){ openManagePreferred(); return; }
+  if(d.clearPreferred!==undefined){
+    S.preferredLineup=null; closeModal();
+    S.message='Preferred lineup cleared.'; render(); saveRosterAuto(); return;
+  }
+  if(d.more!==undefined){ openMoreModal(+d.more); return; }
+  if(d.halftimePrefs!==undefined){ openHalftimePrefs(); return; }
   if(d.unqueue!==undefined){ S.queue.splice(+d.unqueue,1); render(); return; }
   if(d.clearQueue!==undefined){ S.queue=[]; S.selection=null; render(); return; }
   if(d.apply!==undefined){ applyQueue(); return; }
@@ -1510,14 +1625,31 @@ document.addEventListener('click', async (e)=>{
   if(d.doSwap!==undefined){ doSwap(); return; }
   if(d.cancelSwap!==undefined){ S.swapPair=[]; S.selection=null; render(); return; }
   if(d.auto!==undefined){ S.lineup=autoLineup(false); S.removedPositions=[]; S.shortMode=false; render(); return; }
-  if(d.refresh!==undefined){ S.lineup=autoLineup(false); render(); return; }
+  if(d.refresh!==undefined){ S.lineup=autoLineup(false); S.removedPositions=[]; S.shortMode=false; render(); return; }
   if(d.review!==undefined){
     if(S.lineup.some(x=>x==null)){ S.error='Fill all 7 spots before starting — tap an empty spot to choose a player.'; render(); return; }
     S.screen='review'; render(); return;
   }
-  if(d.backSetup!==undefined){ S.screen='setup'; S.snapshot=null; render(); return; }
+  if(d.backSetup!==undefined){ S.screen='setup'; S.editingLive=false; render(); return; }
+  if(d.closeHistory!==undefined){ closeFinishedGame(); return; }
+  if(d.discardGame!==undefined){ discardFinishedGame(); return; }
+  if(d.startingLineup!==undefined){ openStartingLineup(); return; }
+  if(d.leaving!==undefined){
+    const i=+d.leaving; closeModal(); pushUndo('player leaving');
+    S.roster[i].present=false;
+    const pos=S.lineup.indexOf(i);
+    if(pos>=0) S.lineup[pos]=null; // departing player keeps minutes; spot can be filled from the bench
+    S.message=S.roster[i].name+' has left — their minutes are kept. Tap the empty spot to fill it.';
+    render(); return;
+  }
+  if(d.arrived!==undefined){
+    const i=+d.arrived; closeModal();
+    S.roster[i].present=true;
+    S.message=S.roster[i].name+' has arrived and is on the bench.';
+    render(); return;
+  }
   if(d.startGame!==undefined){
-    S.screen='live'; S.liveTab='field'; S.elapsed=0; S.running=true;
+    S.screen='live'; S.liveTab='actions'; S.elapsed=0; S.running=true;
     S.minutesSec=Array(S.roster.length).fill(0); S.gkSec=Array(S.roster.length).fill(0);
     S.posSec=Array.from({length:S.roster.length},()=>({})); S.goals=[]; S.queue=[]; S.ourScore=0; S.theirScore=0;
     S.undoStack=[]; S.halftimeDone=false; S.plannedLineup=null;
@@ -1536,11 +1668,11 @@ document.addEventListener('click', async (e)=>{
   }
   if(d.halftime!==undefined){ S.running=false; S.plannedLineup=null; S.screen='halftime'; render(); return; }
   if(d.end!==undefined){
-    if(confirm('End the game? The finished summary and CSV will be saved to this session’s history.')) finishGame();
+    openConfirm({title:'End the game?', body:'The finished summary and CSV will be saved to this session’s history.', confirmLabel:'End game', onConfirm:()=>{ finishGame(); }});
     return;
   }
   if(d.undo!==undefined){ undoLast(); return; }
-  if(d.editLineup!==undefined){ S.running=false; S.screen='setup'; S.message='Edit the lineup, then Review & start to return to the game. Clock is paused.'; render(); return; }
+  if(d.editLineup!==undefined){ S.running=false; S.editingLive=true; S.screen='setup'; S.message='Edit the lineup, then “Return to live game”. Clock is paused — nothing else resets.'; render(); return; }
   if(d.playShort!==undefined){ openShortChooser(); return; }
   if(d.removePos!==undefined){
     const pos=+d.removePos; pushUndo('play short');
@@ -1559,22 +1691,13 @@ document.addEventListener('click', async (e)=>{
     else { pushUndo('edit goal minute'); const g=S.goals[gi]; const cur=g.seconds==null?0:g.seconds; g.seconds=Math.max(0, Math.min(S.settings.matchMinutes*60, cur+(d.goalPlus!==undefined?60:-60))); }
     openEditGoalsLive(); render(); return;
   }
-  if(d.planRefresh!==undefined){ S.plannedLineup=autoLineup(true); render(); return; }
+  if(d.planRefresh!==undefined){ S.planCount=(S.planCount||1)+1; S.plannedLineup=autoLineup(true); render(); return; }
   if(d.planUse!==undefined){ S.message='Plan set — tap “Start second half” when ready.'; render(); return; }
   if(d.startSecond!==undefined){ startSecondHalf(); return; }
   if(d.snapClock!==undefined){
     S.elapsed=S.settings.matchMinutes*30; S.message='Clock set to '+fmtClock(S.elapsed)+'.'; render(); return;
   }
-  if(d.backLive!==undefined){ S.screen='live'; render(); return; }
-  if(d.takeover!==undefined){
-    // Take over a snapshot: restore its state into a live game, halftime planner first.
-    const sn=S.snapshot; if(!sn) return;
-    S.lineup=[...sn.lineup]; S.elapsed=sn.elapsed; S.ourScore=sn.ourScore; S.theirScore=sn.theirScore;
-    S.minutesSec=sn.minutesTenths.map(t=>t*6); // minutesTenths -> seconds
-    S.gkSec=Array(S.roster.length).fill(0); S.posSec=Array.from({length:S.roster.length},()=>({}));
-    S.goals=S.snapshotGoals.map(g=>({...g})); S.queue=[]; S.plannedLineup=[...(sn.plannedLineup||sn.lineup)];
-    S.snapshot=null; S.screen='halftime'; S.running=false; render(); return;
-  }
+  if(d.backLive!==undefined){ S.editingLive=false; S.screen='live'; render(); return; }
   if(d.newGame!==undefined){ startNewGame(); return; }
   if(d.csvLast!==undefined){
     const last=S.history[S.history.length-1]; if(last) downloadCsv('sub-manager-game.csv', csvForGame(last)); return;
@@ -1592,44 +1715,24 @@ document.addEventListener('click', async (e)=>{
   }
   if(d.lastLineup!==undefined){
     if(!S.lastLineup) return;
+    closeModal();
+    S.removedPositions=[]; S.shortMode=false;
     S.lineup=S.lastLineup.map(i=>S.roster[i]&&S.roster[i].present?i:null);
     S.message='Last game’s lineup applied — spots for unavailable players were left empty.'; render(); return;
   }
   if(d.usePreferred!==undefined){
     if(!S.preferredLineup) return;
+    closeModal();
+    S.removedPositions=[]; S.shortMode=false;
     S.lineup=S.preferredLineup.map(i=>S.roster[i]&&S.roster[i].present?i:null); render(); return;
   }
   if(d.savePreferred!==undefined){
-    S.preferredLineup=[...S.lineup]; S.message='Preferred starting lineup saved in memory only — it will be lost on reload.'; render(); return;
-  }
-  if(d.exportSetup!==undefined||d.exportGame!==undefined){
-    try{
-      const url=d.exportSetup!==undefined?await exportSetupLink():await exportGameLink();
-      const out=$('#link-out'); if(out) out.value=url;
-      await navigator.clipboard.writeText(url);
-      S.message='Link copied to clipboard.'; render();
-      const out2=$('#link-out'); if(out2) out2.value=url;
-    }catch(err){ S.error=err.message==='old'?LINK_ERROR:String(err.message||err); render(); }
-    return;
-  }
-  if(d.smsSetup!==undefined||d.smsGame!==undefined){
-    try{
-      const url=d.smsSetup!==undefined?await exportSetupLink():await exportGameLink();
-      location.href='sms:?&body='+encodeURIComponent('Sub Manager '+(d.smsSetup!==undefined?'setup':'game')+': '+url);
-    }catch(err){ S.error=String(err.message||err); render(); }
-    return;
-  }
-  if(d.import!==undefined){
-    const val=($('#link-in')||{}).value||'';
-    if(!val.trim()){ S.error='Paste a link first.'; render(); return; }
-    try{ await importLink(val); }
-    catch(err){ S.error=LINK_ERROR; render(); }
-    return;
-  }
-  if(d.textCoach!==undefined){
-    const body='Sub Manager — US '+S.ourScore+'–'+S.theirScore+' THEM at '+fmtClock(S.elapsed)+'. On field: '+onField().map(x=>S.roster[x.player].name+' ('+POSITIONS[x.pos]+')').join(', ')+'.';
-    openModal('<h2>Text coach</h2><p>Copy this update and paste it into your message:</p><textarea readonly>'+esc(body)+'</textarea><div class="pin-bottom"><button class="ghost" data-close>Close</button></div>');
-    return;
+    closeModal();
+    S.preferredLineup=[...S.lineup];
+    // Preferred lineup persists with the roster in Supabase (private
+    // app: server persistence), not in memory only.
+    S.message='Preferred starting lineup saved.';
+    render(); saveRosterAuto(); return;
   }
   if(d.score!==undefined){
     const k=d.score;
@@ -1688,6 +1791,14 @@ document.addEventListener('click',(e)=>{
 });
 
 function handleFieldTap(pos, player){
+  // Tapping a player already staged in a swap deselects just that one.
+  if(S.swapPair.includes(pos)){
+    S.swapPair=S.swapPair.filter(x=>x!==pos); S.selection=null; render(); return;
+  }
+  // Tapping the selected player again deselects it.
+  if(S.selection && S.selection.kind==='out' && S.selection.pos===pos){
+    S.selection=null; render(); return;
+  }
   // No swap while a substitution queue is pending.
   if(S.queue.length){
     S.selection={kind:'out', player, pos}; render(); return;
@@ -1717,28 +1828,11 @@ function handleBenchTap(i){
 
 /* ---------- Init ---------- */
 /* Post-sign-in entry (or already-signed-in / unconfigured entry):
-   live-game join, then a #s=/#g= hash import, then history. This runs
-   only after the login gate has passed — never before sign-in. */
+   roster, then history. This runs only after the login gate has
+   passed — never before sign-in. A live game is joined by typing its
+   4-letter code on the Setup screen, never via a link. */
 async function enterApp(){
-  // Roster first (after sign-in): the saved team roster from Supabase
-  // replaces the fictional sample roster. A #s=/#g= hash import or a
-  // live-game join below overrides it for that session, as designed.
   if (SB.configured && SB.authUser) await loadRoster();
-  // Live-game join takes precedence over a #s=/#g= hash import.
-  const params = new URLSearchParams(location.search);
-  const gameCode = params.get('game');
-  let joinedLive = false;
-  if (gameCode) {
-    if (SB.configured) joinedLive = await joinLiveGame(gameCode);
-    else { S.error = 'This live-game link needs Supabase configured — see README.'; render(); }
-  }
-  // Auto-import a #s= / #g= link if the page was opened with one.
-  // (Frozen snapshot fallback — kept working alongside live sync.)
-  if (!joinedLive && location.hash) {
-    try { await importLink(location.hash); }
-    catch (err) { /* Not a valid link — stay on setup; the import box explains the error. */ }
-  }
-  // History from Supabase when configured; in-memory only otherwise.
   if (SB.configured) await loadHistory();
   render();
 }

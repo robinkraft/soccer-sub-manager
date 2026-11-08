@@ -3,29 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="description" content="Sub Manager (shared) — portable youth soccer substitution manager for a 13-player 7v7 team. History and live game sync via Supabase when configured; in-memory only otherwise.">
-<title>Sub Manager (shared) — portable</title>
+<meta name="description" content="Soccer Substitution Manager — youth soccer substitution manager for a 13-player 7v7 team.">
+<title>Soccer Substitution Manager</title>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <div id="app">
-  <header class="app-head">
-    <h1>Sub Manager (shared)</h1>
-    <p>Portable version &middot; Supabase history + live when configured, in-memory only otherwise &middot; fictional sample roster</p>
-  </header>
   <main id="main" aria-live="polite"></main>
   <div id="modal-root"></div>
-  <footer class="foot">
-    Portable source — no tracking. Game and history data are never
-    stored in this browser; they live in Supabase (sign-in required)
-    or in memory only. The one exception is the sign-in session
-    itself, saved by Supabase Auth in this browser until you sign out.
-    With Supabase configured (see README), finished games are saved to
-    history and the live game syncs between the driver and a view-only
-    phone. Without it, nothing is saved between reloads, including your
-    preferred starting lineup. Share a setup or game with the texted-link
-    tools on the Setup screen.
-  </footer>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script src="supabase-config.js"></script>

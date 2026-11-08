@@ -1,7 +1,11 @@
-# Sub Manager (shared) — portable source
+# Soccer Substitution Manager — portable source
 
-A faithful, working rebuild of Robin's Sub Manager (shared) app as plain
-files. Vanilla HTML/CSS/JS — **no build step, no Muse runtime**. The only
+A clean implementation of Robin's **private** Soccer Substitution
+Manager app as plain files — not the shared version. (The first portable
+build was based on the shared app; this one was rebuilt from the private
+app Robin actually used for the game, with the private app's screens,
+labels, controls and business rules, verified against its screenshots.)
+Vanilla HTML/CSS/JS — **no build step, no Muse runtime**. The only
 external script is the Supabase JS client (CDN), used only when Supabase
 is configured — see below. When Supabase is configured, **sign-in is
 required**: coaches sign in with email + password (Supabase Auth) before
@@ -11,11 +15,13 @@ history or a live game will load at all.
 
 - `index.html` — shell; loads the Supabase client (CDN), `supabase-config.js`, `styles.css`, and `app.js`
 - `app.js` — the whole app: state, clock/minutes, lineup generation,
-  queue + swap, scorer picker, halftime planner, CSV export, v5 links,
+  queue + swap, scorer picker, halftime planner, CSV export,
   Supabase history + live sync
 - `supabase-config.js` — Supabase project URL + anon key (empty by default; fill in to turn the backend on)
 - `supabase/schema.sql` — the three tables (`game_history`, `live_games`, `team_roster`) + RLS policies; run once in Supabase for a new project
 - `supabase/add-team-roster.sql` — adds only `team_roster` to a project that already has the other two tables; run once, safe to re-run
+- `supabase/add-private-parity.sql` — adds `team_roster.preferred_lineup` (preferred lineup persists server-side), `game_history.elapsed_seconds` (actual played time, shown as "52:02 played"), and an authenticated-only DELETE policy on `game_history` for "Discard this game"; run once, safe to re-run
+- `docs/history-import.md` — how the private app's 10 past games get into Supabase `game_history` (import script lives outside this repo — see that doc)
 - `docs/backend-history-design.md` — history design
 - `docs/live-game-design.md` — live-game design (driver / view-only, realtime, conflicts, offline)
 - `styles.css` — phone-first (390×844), high-contrast styling
@@ -31,8 +37,7 @@ python3 -m http.server 8000
 
 Any static server works (`npx serve`, `python -m http.server`, drag the
 folder into a static host, etc.). Opening `index.html` directly from disk
-also works for most things, but a static server is recommended — the link
-encoder uses the page URL, and `sms:` / clipboard behave better over HTTP.
+also works for most things, but a static server is recommended.
 
 ## Host on GitHub Pages
 
@@ -44,14 +49,12 @@ encoder uses the page URL, and `sms:` / clipboard behave better over HTTP.
    full-screen icon (it is still just a web page — no background audio or
    native-app behaviour).
 
-**Do NOT make the repo public (or enable Pages) until it has been
-recreated clean.** An earlier pushed commit still contains the real
-player names in Git history, so a commit that removes them is not
-enough — the old commit would still be visible once the repo is
-public. Recreate the repo from only these scrubbed files, then make
-that one public. The code in this folder now contains only the
+**Do NOT push these rebuilt files to GitHub (or enable Pages) until
+they have been reviewed.** The repo history was already cleaned (an
+earlier pushed commit that contained the real player names was removed
+by rebase + force-push). The code in this folder now contains only the
 fictional sample roster (see "Roster" below); real player names live
-only in Supabase, behind coach login.
+only in Supabase, behind coach login. Review first, then push.
 
 ## Supabase backend — roster + history + live game (optional, recommended)
 
@@ -115,8 +118,8 @@ roster is saved yet, the fictional sample roster is shown instead.
   whole live state as a single snapshot — the same one-snapshot idea
   as the private Muse app's SQLite `app.db`, with Supabase as the
   server instead.
-- The other coach opens the live link (`?game=K7Q2`, from the Live
-  screen's "Copy live link"). That phone is **view-only**: it sees the
+- The other coach signs in, opens Setup → Lineup, and enters the
+  4-letter game code in **Join a live game**. That phone is **view-only**: it sees the
   field, bench, queue, score, clock, and minutes live via Supabase
   Realtime, all edit controls are blocked with a clear banner, and it
   can **Take over** (with confirmation) to become the driver — the
@@ -133,8 +136,8 @@ roster is saved yet, the fictional sample roster is shown instead.
 - Offline: the app always works in-memory first and shows "Offline —
   changes will sync when signal returns". On reconnect it re-fetches
   and offers the same conflict choice if needed.
-- The frozen `#g=` texted snapshot links still work as a fallback —
-  they were not removed.
+- There are no links to text: the other coach joins by typing the
+  game code — nothing is copied or texted.
 
 ### No config / offline
 
@@ -200,11 +203,8 @@ There is no seed file with real names — seed from the app instead:
    on each sample player, typing the real name. Each rename saves to
    Supabase automatically. Fix position prefs the same way, and set
    the team name under Match settings.
-3. Or: import a setup link carrying the real roster (Setup → "Import
-   texted setup or game"), then tap **Save roster to Supabase** under
-   Team & positions. A link-imported roster is adopted for that
-   session only and is never auto-saved — the explicit save is what
-   writes it to `team_roster`.
+3. There is no seed file and no link import — rename from the app
+   (above) is the only way the real roster gets in.
 
 Either way, after seeding, every sign-in loads the saved roster from
 Supabase and the sample names are gone from the screen.
@@ -222,13 +222,15 @@ Supabase and the sample names are gone from the screen.
   the swap **immediately** — no Apply. Undo is offered after. No swap
   can start while substitution queue items are pending.
 - **Field is one component.** Setup, kickoff review, live, halftime and
-  finished screens all render the same field. Chips show just the name,
+  finished screens all render the same field — our half only, no
+  halfway line or centre circle. Chips show just the name,
   centred; empty spots show just the position label; full names are never
   truncated.
 - **Live screen.** Field pinned at the top, bench above the queue, tabs
-  under the scoreboard (Field / Minutes / Team / History), Text coach as
-  a compact action at the bottom. No Add button — tapping the field is
-  the entry point. No Positions button.
+  under the scoreboard (Actions / Minutes / Team / Positions). The
+  driver sees the game code as plain text under the tabs; the other
+  coach joins by typing that code on setup. No Add button — tapping
+  the field is the entry point.
 - **Goals.** US + / THEM + opens the scorer picker: players A–Z in a
   two-column newspaper-style grid, one line per player, Own goal and
   Skip pinned at the bottom, goal minute with −/+ steppers before
@@ -249,7 +251,7 @@ Supabase and the sample names are gone from the screen.
   off, totals count only non-goalie minutes; goalie minutes are still
   tracked and shown in the per-position breakdown.
 - **Notes.** Per-player notes on the Team tab are private and are
-  **never included** in texted links. Lineup pickers show a player's
+  **never shared**. Lineup pickers show a player's
   already-assigned position next to their name (display only).
 - **History & CSV.** Finished games list score, scorers and minutes,
   with season totals; each exports a CSV with player, attendance,
@@ -257,31 +259,16 @@ Supabase and the sample names are gone from the screen.
   Supabase configured, history comes from the backend and survives
   reloads; without it, it is this session only.
 
-## Texted setup / game links (v5)
+## Joining a live game (game code)
 
-Same wire format as the original apps, so links interoperate with them:
-
-- Payload = `v5` + base64url(deflate-raw(UTF-8 JSON)), no padding.
-- Setup: `["ssm",4,"s",teamName,settings,roster,lineup]`
-- Game snapshot: `["ssm",4,"g",teamName,settings,roster,lineup,matchMinutes,elapsedSeconds,ourScore,theirScore,minutesTenths,presentMask,tiredMask,plannedLineup,rotation,goals]`
-- Settings are `[matchMinutes, cadence, subsPerRotation, fairTimeThreshold]`
-  with an optional 5th element (1/0) for the goalie-time setting; older
-  4-element links import with goalie time defaulting to off.
-- Goals are `[[playerIndex, secondsOrNull]]`; `-1` is an own goal.
-- **No backward compatibility** with older link formats — only this
-  schema imports. Anything else shows: "This link looks broken or is
-  from an older version — ask for a fresh link."
-
-Use **Copy setup link / Copy game link** (or the SMS buttons) on the
-Setup / Live screens, and **Import texted setup or game** to paste a link
-the other coach sent. Import adopts the link's roster. A `#g=` snapshot
-opens read-only ("Snapshot · as of MM:SS — not live"); **Take over**
-opens the halftime planner for review before the clock resumes.
-
-Link encoding uses `CompressionStream` / `DecompressionStream`
-(deflate-raw), available in current Chrome/Safari/Firefox. If a browser
-lacks them, link creation/import shows an error instead of silently
-producing a bad link.
+No links, no texting. The driver starts the game and the app shows a
+4-letter game code as plain text on the live screen. The other coach
+signs in, opens Setup → Lineup, types the code into **Join a live
+game**, and taps **Join live game** — that phone becomes view-only and
+sees the game live. Take over (with confirmation) swaps the driver.
+The `?game=` URL parameter and the old `#s=` / `#g=` texted links
+were removed entirely in Nov 2026; the v5 link format code is gone
+with them.
 
 ## Deliberately left out
 
@@ -293,3 +280,121 @@ producing a bad link.
 - **The private app's real roster and server history.** This copy is the
   shared app only.
 - **Anything else that needs a backend** (push, background audio).
+
+
+## Clean implementation of the private app — what changed
+
+The portable app was rebuilt from the private Soccer Substitution
+Manager (screens, labels, controls, rules), not incrementally patched
+from the shared version. Gap list — private feature → portable before
+→ portable now:
+
+- **Branding** — was "Sub Manager (shared)"; now "Soccer Substitution Manager".
+- **Setup tabs** — was one scrolling page of `<details>` sections; now
+  top-level tabs **Lineup / Roster / Settings / History**, as in the
+  private app. Lineup tab: Join a live game (game code), Preferred
+  lineup (Ready / Manage), Use last game's lineup, Refresh lineup +
+  Review & start, Clear, field, OPENING BENCH line. Roster tab:
+  "Attendance & positions", availability circle, name, "Available ·
+  N positions", Rename + More, position chips inline with green
+  checkmarks. Settings tab: match settings. History tab: season totals
+  + past games.
+- **Live tabs** — was Field / Minutes / Team / History; now
+  **Actions / Minutes / Team / Positions**. Scoreboard is the private
+  layout: US −/+ on the left, clock centre, THEM −/+ on the right,
+  +2:00 and an orange PAUSE/RESUME below. Actions tab: field with
+  minutes under each name, bench, big orange "Apply N now", "Next
+  change / N ready / Clear" with numbered queued pairs.
+- **Halftime** — was a plain planner; now the private screen: HALFTIME
+  badge, "Reset the balance." headline, two-column first-half minutes,
+  "Position preferences", green
+  "Refresh lineup" with a "Lineup N" counter, "Second-half 7v7 lineup"
+  with "N/7 filled · tap a player to change".
+- **History** — was a `<details>` list; now expandable Details/Hide
+  cards with date, score, "MM:SS played", "Export this game CSV",
+  "Goals / Edit goals", and per-player rows with the counted total
+  plus a per-position breakdown (goalie minutes included in the
+  breakdown). Season totals are cards per the private screen — see
+  below.
+- **Preferred lineup** — was in-memory only; now persists in Supabase
+  (`team_roster.preferred_lineup`) and survives reloads.
+- **Last game's lineup** — was in-session only; now derived from the
+  newest `game_history` row after reload.
+- **Notes** — were in-memory only; now stored in
+  `team_roster.players[].note` and persist across games (still never
+  shared).
+- **Finished screen** — gained "Close and view history" (opens the
+  History tab) and "Discard this game" (deletes the Supabase row —
+  needs the authenticated-only DELETE policy in
+  `add-private-parity.sql`).
+- **Edit lineup mid-game** — now a dedicated editor that returns to
+  the live game without resetting clock/score/minutes.
+- **Late arrivals / departing players** — now on the live Team tab
+  (Leaving / Arrived); a departing player keeps their minutes.
+- **Clock** — keeps running past full time; overage shows next to it.
+- **Swap** — tapping a selected player deselects just that one.
+- **Scorer picker** — one-line rows (name · position).
+- **No "7 on field" indicator** on setup; preferred lineup collapsed
+  behind Manage; finished screen opens scrolled to the top.
+
+Intentionally different from the private app:
+
+- **Supabase replaces the private app's server persistence** (its
+  SQLite snapshot). History, roster and preferred lineup live in
+  Supabase tables, not in a Muse server.
+- **Login replaces the private app's owner session.** Any signed-in
+  coach can read/write; coach accounts are created by Robin in the
+  Supabase Auth dashboard. There is no in-app sign-up (an open
+  sign-up would let anyone who finds the public Pages site create an
+  account and read/write the tables).
+- **Live game is driver / view-only**, which the private app doesn't
+  have: one phone drives, the other watches live and can Take over.
+- **Visual language** follows the private app's screenshots (dark
+  navy, dark cards, green field, white chips with dark text, yellow
+  selected tab, green primary buttons, orange Apply/PAUSE), but the
+  layout is rebuilt in plain CSS, not a copy of the private app's
+  markup.
+
+## Season totals
+
+The History tab's Season totals are computed from **all** Supabase
+`game_history` rows (not just this session), sorted by total minutes
+descending, and update whenever a game is added or a past game is
+edited (Edit goals re-saves the row). Each card shows: name, avg/game
+(one decimal, from exact seconds ÷ games played), bold total minutes,
+games played, and a per-position breakdown in whole minutes.
+
+Goalie-time rule (verified end-to-end in code): the setting "Count
+goalie time toward total game time" defaults OFF. When OFF, the total
+and avg count only non-goalie minutes, while the per-position
+breakdown still includes goalie minutes; fair share is computed on
+the six non-goalie field slots, and a player standing in goal accrues
+no counted projected minutes. When ON, goalie minutes count toward
+everything. "↓ Full season CSV" downloads the same totals (one row
+per player, with per-position columns).
+
+## History import (private app's 10 past games)
+
+The private app's saved state is not readable by the agent, so the
+import goes through its CSV exports. The import script and its docs
+live **outside this repo** (they contain the real roster), at
+`~/workspace/soccer-sub-manager-history-import/` — see
+`docs/history-import.md` in this repo for the steps: export each
+game's CSV from the private app, fill in `manifest.json`, dry-run
+`node import-history.mjs`, paste the generated SQL into the Supabase
+SQL Editor. Re-running the SQL is safe (dedupe on game_date + score).
+No historical rows have been inserted yet — the import is waiting on
+the CSV exports. After it runs, Season totals in this app must match
+the private app's Season totals screen; that is the verification
+check.
+
+## Temporary private preview (not the deliverable)
+
+After this rebuild, a **temporary private preview artifact** may be
+made from these files so Robin can try the rebuilt app on his phone
+in the Muse app (sign in with his coach account, same Supabase
+backend) before anything is pushed to GitHub. The preview is only for
+trying it out — it is **not** the deliverable, and it is to be deleted
+after he approves the GitHub push. The GitHub source in this folder
+remains the real app. Do not treat the preview link as a share link:
+never publish it or hand it to anyone else.

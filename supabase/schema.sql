@@ -26,6 +26,9 @@ create table if not exists public.game_history (
   game_date date not null,
   team_name text not null default 'Sample Team',
   match_minutes int not null default 50,
+  -- Actual elapsed seconds when the game ended (clock may run past
+  -- full time; History shows this as "52:02 played").
+  elapsed_seconds int not null default 0,
   our_score int not null default 0,
   their_score int not null default 0,
   -- Per-player totals, one entry per present player, in roster order.
@@ -69,6 +72,14 @@ create policy "Signed-in coaches can edit a saved game (goals/minutes)"
   to authenticated
   using (true)
   with check (true);
+
+-- Discard (private finished screen: "Discard this game" removes the
+-- finished game from History). Authenticated coaches only; the anon
+-- role gets nothing, same as the other policies.
+create policy "Signed-in coaches can discard a saved game"
+  on public.game_history for delete
+  to authenticated
+  using (true);
 
 -- ---------------------------------------------------------------------------
 -- Live game (optional, same project — see docs/live-game-design.md)
@@ -158,8 +169,15 @@ create table if not exists public.team_roster (
   id uuid primary key default gen_random_uuid(),
   team_name text not null default 'Sample Team',
   -- Player list, in roster order.
-  -- [{ "name": "Maya", "prefs": ["ST", "RM", "LM"] }]
+  -- [{ "name": "Maya", "prefs": ["ST", "RM", "LM"], "note": "" }]
+  -- Notes persist with the roster (private app) but are never
+  -- included in texted links.
   players jsonb not null default '[]'::jsonb,
+  -- Preferred starting lineup, roster indices in position order
+  -- GK, RB, LB, RM, CM, LM, ST (null = empty spot). The private app
+  -- persists the preferred lineup server-side; here it lives in this
+  -- row so it survives reloads.
+  preferred_lineup jsonb not null default '[]'::jsonb,
   updated_at timestamptz not null default now()
 );
 

@@ -88,8 +88,8 @@ Setup steps for Robin (about 5 minutes, in his Supabase account):
   background sync.
 - The roster lives in Supabase (`team_roster`, authenticated-only),
   loaded after sign-in; the code contains only the fictional
-  13-player sample roster as a fallback. A roster imported from a
-  texted link is adopted for that session only and is not written to
+  13-player sample roster as a fallback. A roster from a live game
+  is adopted for that session only and is not written to
   `team_roster` unless the coach taps "Save roster to Supabase".
   Real player names are gated behind coach login + authenticated
   RLS, which is the tightening that was previously listed as a

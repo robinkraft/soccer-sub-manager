@@ -32,7 +32,9 @@ server instead of Muse's SQLite file.
 One row per active game. Schema in `supabase/schema.sql`.
 
 - `game_code` — short code (e.g. `K7Q2`), generated at Start game,
-  shared via the game link (`?game=K7Q2`). This is the sharing key.
+  shown as plain text on the driver's live screen. The other coach
+  types it into **Join a live game** on setup. This is the sharing key;
+  there is no link.
 - `phase` — `setup` | `live` | `halftime` | `finished`
 - `version` — optimistic concurrency counter, +1 per write
 - `last_writer_id` / `last_writer_label` — random per-tab id generated
@@ -60,9 +62,7 @@ The clock is an anchor, not a ticking value:
    `live_games`) filtered to that code.
 3. An action on phone A writes version N+1; phone B receives it and
    re-renders field, bench, queue, score, and clock from the snapshot.
-4. End game → insert one `game_history` row, mark the live row
-   `finished`. The texted `#g=` snapshot links keep working as a
-   frozen fallback — they are not removed.
+4. End game → insert one `game_history` row, mark the live row `finished`.
 
 ## Conflicts (two writers)
 
@@ -88,7 +88,7 @@ The clock is an anchor, not a ticking value:
 
 - **One driver, other view-only** — implemented: the second phone
   subscribes read-only, sees everything live, and uses Take over to
-  become the driver (with confirmation, as today's `#g=` takeover does).
+  become the driver (with confirmation).
   The driver writes with optimistic versioning; the conflict banner
   (Reload / Keep mine) still applies if the row moved under the driver.
 - Both coaches editing was considered and not chosen; history-only was
