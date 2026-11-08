@@ -1667,6 +1667,45 @@ function startClock(){
   // itself — End game does.
   clockTimer=setInterval(()=>{ if(!S.running) return; refreshClockDom(); },1000);
 }
+
+/* ---------- Screen wake lock ---------- */
+/* Keep the screen on while a live game is on screen, so the phone
+   does not dim/lock mid-game on the sideline (Screen Wake Lock API,
+   iOS 16.4+ over HTTPS). Invisible: no buttons, toggles, or settings.
+   Held ONLY while a live game is showing (live or halftime, coach or
+   viewer) — setup, review, viewer home, finished, and entry never
+   hold it, so it cannot drain battery when no game is being watched.
+   The browser releases the lock by itself when the tab is hidden, so
+   visibilitychange/focus re-requests it through render(). A missing
+   API, a denial, or a failed request is a silent no-op: the app
+   works exactly as before, with nothing shown to the user. */
+let wakeLockSentinel=null, wakeLockPending=false;
+async function requestWakeLock(){
+  if (!('wakeLock' in navigator) || wakeLockSentinel || wakeLockPending) return;
+  wakeLockPending=true;
+  try{
+    const sentinel=await navigator.wakeLock.request('screen');
+    wakeLockSentinel=sentinel;
+    // If the system releases the lock (tab hidden, low battery, …),
+    // clear the sentinel so the next sync can re-request it.
+    sentinel.addEventListener('release', ()=>{ if(wakeLockSentinel===sentinel) wakeLockSentinel=null; });
+  }catch(e){ /* unsupported, denied, or not visible — silent no-op */ }
+  wakeLockPending=false;
+}
+async function releaseWakeLock(){
+  if(!wakeLockSentinel) return;
+  const sentinel=wakeLockSentinel; wakeLockSentinel=null;
+  try{ await sentinel.release(); }catch(e){ /* already released */ }
+}
+function syncWakeLock(){
+  // render() calls this on every screen change, so the lock follows
+  // the screen: requested on entering a live game, released on
+  // leaving it (ended, shut down, back to setup, finished screen).
+  // A hidden tab cannot hold a lock — the request would reject — so
+  // only request while visible; coming back re-renders and retries.
+  if ((S.screen==='live' || S.screen==='halftime') && !document.hidden) requestWakeLock();
+  else releaseWakeLock();
+}
 function fieldSpotHtml(pos, opts){
   const p=S.lineup[pos];
   const removed=S.removedPositions.includes(pos);
@@ -1824,6 +1863,23 @@ function teamRowsHtml(){
       +secondRow+'</div>';
   }).join('');
 }
+/* Season goals, counted from each game's RECORDED goals — not the
+   stored per-player p.goals, which Edit goals on a past game never
+   updates (assigning / removing / backfilling a goal mutates h.goals
+   only). A goal counts for a player only when it is a US goal with
+   that player as scorer (name-first, index fallback into the game's
+   own players). Unknown scorers, own goals, and THEM goals count for
+   nobody. Returns Map name -> goals. */
+function seasonGoalsByName(){
+  const goals = new Map();
+  S.history.forEach(h => (h.goals || []).forEach(g => {
+    if ((g.side || 'us') !== 'us') return;
+    if (g.player == null || g.player === -1) return;
+    const name = g.player_name || ((h.players || [])[g.player] || {}).name;
+    if (name) goals.set(name, (goals.get(name) || 0) + 1);
+  }));
+  return goals;
+}
 function seasonTotalsHtml(){
   if(!S.history.length) return '';
   const totals = new Map();
@@ -1832,11 +1888,16 @@ function seasonTotalsHtml(){
     // p.seconds is the COUNTED total (goalie-adjusted per the setting);
     // p.gkSeconds and the per-position breakdown keep goalie minutes
     // separately, so they still show even when the total excludes them.
-    t.seconds += (p.seconds || 0); t.gkSeconds += (p.gkSeconds || 0); t.goals += (p.goals || 0);
+    // Goals come from seasonGoalsByName below, not p.goals.
+    t.seconds += (p.seconds || 0); t.gkSeconds += (p.gkSeconds || 0);
     if (p.present) t.games += 1;
     Object.entries(p.posSeconds || {}).forEach(([k, v]) => { t.pos[k] = (t.pos[k] || 0) + v; });
     totals.set(p.name, t);
   }));
+  // Goals counted from the recorded goals (see seasonGoalsByName):
+  // 0 for a scoreless player — the card always shows the figure.
+  const seasonGoals = seasonGoalsByName();
+  totals.forEach(t => { t.goals = seasonGoals.get(t.name) || 0; });
   // Card layout from the private Season totals screen: name + games on
   // the left, average per game large on the right with the bold total
   // beneath it, per-position breakdown (whole minutes, position order,
@@ -1852,7 +1913,7 @@ function seasonTotalsHtml(){
       return '<div class="card season-card"><div class="row spread"><div><span class="season-name">' + esc(t.name) + '</span></div>'
         + '<div style="text-align:right"><div><span class="season-avg">' + avg + '</span> <span class="muted">avg/game</span></div>'
         + '<div class="season-total">' + Math.round(t.seconds / 60) + ' <span class="muted" style="font-size:15px">min</span></div></div></div>'
-        + '<div><strong>' + t.games + '</strong> <span class="muted">game' + (t.games === 1 ? '' : 's') + '</span></div>'
+        + '<div><strong>' + t.games + '</strong> <span class="muted">game' + (t.games === 1 ? '' : 's') + '</span> &middot; <strong>' + t.goals + '</strong> <span class="muted">goal' + (t.goals === 1 ? '' : 's') + '</span></div>'
         + (posLine ? '<div class="muted season-pos">' + posLine + '</div>' : '') + '</div>';
     }).join('');
   // Anonymous code-joined watchers see the totals but get no CSV
@@ -1867,14 +1928,19 @@ function seasonTotalsHtml(){
 }
 function seasonCsv(){
   // Same totals as the Season totals cards, one row per player.
+  // Goals counted from the recorded goals (see seasonGoalsByName),
+  // so the CSV agrees with the cards even after Edit goals on a past
+  // game — the stored p.goals is not updated by those edits.
   const totals = new Map();
   S.history.forEach(h => (h.players || []).forEach(p => {
     const t = totals.get(p.name) || { name: p.name, seconds: 0, games: 0, goals: 0, gkSeconds: 0, pos: {} };
-    t.seconds += (p.seconds || 0); t.gkSeconds += (p.gkSeconds || 0); t.goals += (p.goals || 0);
+    t.seconds += (p.seconds || 0); t.gkSeconds += (p.gkSeconds || 0);
     if (p.present) t.games += 1;
     Object.entries(p.posSeconds || {}).forEach(([k, v]) => { t.pos[k] = (t.pos[k] || 0) + v; });
     totals.set(p.name, t);
   }));
+  const seasonGoals = seasonGoalsByName();
+  totals.forEach(t => { t.goals = seasonGoals.get(t.name) || 0; });
   const head = ['Player','Games played','Avg minutes per game','Total minutes','GK minutes','Goals', ...POSITIONS].join(',') + '\n';
   const lines = [...totals.values()].sort((a, b) => b.seconds - a.seconds).map(t => {
     const cells = [t.name, t.games, t.games ? ((t.seconds / 60) / t.games).toFixed(1) : '0.0',
@@ -2142,6 +2208,12 @@ function loadingHtml(){
   return '<section aria-label="Loading game" style="min-height:60vh;display:flex;align-items:center;justify-content:center"><p class="muted" style="font-size:17px">Loading game&hellip;</p></section>';
 }
 function render(){
+  // Screen wake lock follows the screen: held only while a live game
+  // (live or halftime) is showing, released everywhere else. Called
+  // first so the early returns (loading screen, entry/sign-in) release
+  // it too — a parent who opens a game link never holds the lock on
+  // the loading or entry screen.
+  syncWakeLock();
   // Loading a game deep link: the neutral screen above, before the
   // login gate — a parent opening a shared link must never see the
   // setup screen or the sign-in form flash by while the game loads.
