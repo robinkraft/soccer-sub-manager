@@ -128,11 +128,15 @@ minutes) and background (white chip on the green field vs dark card
 on navy):
 
 - 48px field chip / 46px bench button, fixed heights, never shifting.
-- The name is the only in-flow content and is vertically (and
-  horizontally) centred in every state.
-- Minutes and the queued pairing live in one absolutely-positioned
-  strip at the bottom, same format everywhere: "0m" clean,
-  "0m → Name" queued (the arrow names the counterpart player).
+- Name + minutes are one compact stacked unit (the old app's
+  group-centred stack, Robin's call Nov 2026): the name on top, the
+  minutes/incoming line directly beneath it, adjacent, and the whole
+  unit is vertically (and horizontally) centred in the chip. The name
+  therefore sits a few px above true geometric centre; that is the
+  intended look, not a bug.
+- Minutes and the queued pairing read in the same format everywhere:
+  "0m" clean, "0m → Name" queued (the arrow names the counterpart
+  player). The line only ever changes text, never height.
 - A queued player uses the same pale-yellow highlight on field and
   bench, with the same brown pill badge on the top edge: "↓ POS"
   for the player going off the field, "↑ POS" for the one coming on.
@@ -226,6 +230,45 @@ regenerating. The link is `?view=CODE` on the app's own URL, and
 the plain code is shown alongside it for reading out loud. The link
 works any time — with no live game running, the viewer still sees
 the history.
+
+Opening a `?view=CODE` link joins the view automatically on cold load
+(no tapping, no typing): `init` calls `joinViewerCode` with the code
+from the URL before anything else renders. A wrong code shows "That
+view code was not found — check the code" on the entry screen; a
+failed check (the server or the connection erroring — e.g. the
+missing-column incident below) is a DIFFERENT message, "Couldn't
+check the code — check your connection and try again", and is never
+reported as a wrong code. The error is painted by exactly one render
+in the join flow — a second render used to repaint the entry screen
+after the message was consumed and swallow it, so `joinViewerCode`
+sets the error and leaves rendering to its caller. The 3-second
+viewer poll likewise surfaces a persistent failure: one failed poll
+retries silently, two consecutive failures show "Couldn't refresh
+the shared view — check your connection and try again"; a successful
+poll clears it.
+
+Missing-column incident (Nov 2026, found by calling `viewer_access`
+for a real code): Robin's `live_games` table was created from the
+FIRST schema.sql, before `updated_at` was added to it — `CREATE
+TABLE IF NOT EXISTS` never adds columns to an existing table. The
+function ordered by `l.updated_at`, so every view-code check errored
+(HTTP 400, `column l.updated_at does not exist`) and the app reported
+the code as "not found"; live sync writes (`doLiveSync`,
+`finishLiveGame`) also set `updated_at` and failed silently the same
+way. The first fix run still failed — the live table was created
+without ANY timestamp columns (no `created_at` either), so the
+function then errored on `l.created_at`. Fix: run
+`supabase/add-missing-columns.sql` once (adds `updated_at` and
+`created_at` IF NOT EXISTS to `live_games`, `created_at` to
+`game_history`, `updated_at` to `team_roster`, and recreates
+`viewer_access` ordering live games by `game_code` and history by
+`game_date` — no timestamp ordering anywhere, so the check can never
+break on a missing timestamp column again). The same missing columns
+also broke the coach's roster load/save and the active-game note,
+which order/set `updated_at` — all covered by the same file.
+`supabase/add-viewer-access.sql` and the `viewer_access` in
+`supabase/schema.sql` use the same timestamp-free ordering, so
+re-running either cannot reintroduce the dependency.
 
 Tradeoff, stated plainly: the code is the key, and a 4-letter code
 is guessable — anyone who guesses the active code sees the live

@@ -101,13 +101,16 @@ begin
   -- The running live games, if any (live or halftime only — a
   -- finished game is covered by the history below, not by a stale
   -- live row). All of them: a viewer picks which one to watch.
-  select coalesce(jsonb_agg(row_to_json(l) order by l.updated_at desc), '[]'::jsonb)
+  -- Ordered by game_code, never by a timestamp: the live table was
+  -- once created without ANY timestamp columns, and ordering by one
+  -- made the whole check error (see add-missing-columns.sql).
+  select coalesce(jsonb_agg(row_to_json(l) order by l.game_code), '[]'::jsonb)
     into v_lives
   from (
     select id, game_code, version, phase, state
     from public.live_games
     where phase in ('live', 'halftime')
-    order by updated_at desc
+    order by game_code
   ) l;
   -- The whole history, newest first (capped: a season is tens of games).
   select coalesce(jsonb_agg(row_to_json(h) order by h.game_date desc, h.created_at desc), '[]'::jsonb)

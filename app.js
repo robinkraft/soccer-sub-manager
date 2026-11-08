@@ -156,6 +156,7 @@ const SB = {
   // Realtime on live_games) instead of subscribing.
   viewerMode: false, viewerTimer: null, viewerHistoryJson: '', viewerJoinedCode: '',
   viewerLives: [], // live games returned by viewer_access for this code
+  viewerPollFails: 0, // consecutive viewer_access poll failures (see refreshViewer)
   // Share code the coach generated (Settings → Share a view link).
   viewerCode: '', viewerCodeLoaded: false, viewerCodeLoading: false,
   // Active live games, for the "there's a live game" note on setup:
@@ -764,20 +765,28 @@ async function joinLiveGame(code, opts) {
    Anon viewers poll the function (no Realtime for anon); a signed-in
    coach who opens a viewer link drives like any coach (see below). */
 async function joinViewerCode(code) {
-  if (!SB.configured) { S.error = 'Viewing needs Supabase — try again later.'; render(); return false; }
+  // On failure this sets S.error (and leaves the loading screen for
+  // setup) but does NOT render: every caller renders exactly once
+  // after the call, so the error is painted once and never wiped by
+  // a second render in the same flow (a double render used to eat
+  // the message — the entry screen came back with no explanation).
+  if (!SB.configured) { S.error = 'Viewing needs Supabase — try again later.'; if (S.screen === 'loading') S.screen = 'setup'; return false; }
   code = (code || '').trim().toUpperCase();
-  if (!code) { S.error = 'Enter the 4-letter view code first.'; render(); return false; }
+  if (!code) { S.error = 'Enter the 4-letter view code first.'; if (S.screen === 'loading') S.screen = 'setup'; return false; }
   try {
     const { data, error } = await SB.client.rpc('viewer_access', { p_code: code });
     if (error) throw error;
-    if (!data || !data.ok) { S.error = 'That view code was not found — check the code.'; if (S.screen === 'loading') S.screen = 'setup'; render(); return false; }
+    if (!data || !data.ok) { S.error = 'That view code was not found — check the code.'; if (S.screen === 'loading') S.screen = 'setup'; return false; }
     SB.viewerMode = true; SB.viewerJoinedCode = code;
     applyViewerAccess(data);
     return true;
   } catch (e) {
-    S.error = 'Could not load the shared view.';
+    // A failed check is NOT a wrong code: the server (or the
+    // connection) failed — e.g. viewer_access erroring on a missing
+    // column returns HTTP 400 here. Say so plainly and let the
+    // parent retry; never report it as "code not found".
+    S.error = 'Couldn\'t check the code — check your connection and try again.';
     if (S.screen === 'loading') S.screen = 'setup';
-    render();
     return false;
   }
 }
@@ -857,6 +866,7 @@ async function refreshViewer() {
   try {
     const { data, error } = await SB.client.rpc('viewer_access', { p_code: SB.viewerJoinedCode });
     if (error) throw error;
+    SB.viewerPollFails = 0; // a response (ok or not-ok) means the check works again
     if (!data || !data.ok) {
       // Code deactivated while watching — the link is dead.
       const msg = 'This view link is no longer active.';
@@ -888,7 +898,17 @@ async function refreshViewer() {
       // with a Join button — the viewer taps it, no auto-jump.
       render();
     }
-  } catch (e) { /* poll failure is silent — the next poll retries */ }
+  } catch (e) {
+    // A single poll failure is transient — the next poll (3s) retries
+    // silently. But a persistently failing check (e.g. viewer_access
+    // erroring server-side, as a missing column once made it do) must
+    // not fail silently forever while the parent watches a frozen
+    // view: after two consecutive failures, say so once. The next
+    // successful poll clears the counter above, and the message is
+    // replaced by the next render's content.
+    SB.viewerPollFails = (SB.viewerPollFails || 0) + 1;
+    if (SB.viewerPollFails === 2) { S.error = 'Couldn\'t refresh the shared view — check your connection and try again.'; render(); }
+  }
 }
 /* Viewer home screen: the live games (if any) with a Join button
    each, then history. A started game appears here on the next poll —
@@ -1199,11 +1219,13 @@ async function routeFromUrl(){
       // on setup — the way back is right there.
       return await joinLiveGame(gameCode, {push:false});
     }
-    if (viewCode && SB.configured) {
+    if (viewCode) {
       // Viewer link with a game, not joined yet (e.g. back-button
       // into a viewer URL): join the view first, then the game.
+      // joinViewerCode sets the error but does not render — this
+      // single render paints it.
       const ok = await joinViewerCode(viewCode);
-      if (!ok) { if (S.screen === 'loading') S.screen = 'setup'; render(); return true; } // joinViewerCode shows the error
+      if (!ok) { render(); return true; } // joinViewerCode shows the error
       return await routeFromUrl();
     }
     return false; // needs sign-in first; enterApp routes after sign-in
@@ -1671,11 +1693,13 @@ function fieldSpotHtml(pos, opts){
   // (private app); setup / review / finished chips show just the name.
   // A queued-in player is shown inside the chip ("-> name"), with the
   // position badge on the chip's top edge — never as a line under it.
-  // Minutes and incoming lines are always rendered (empty when
-  // absent) inside one absolutely-positioned strip at the bottom of
-  // the chip (see .sub in styles.css), so the name stays vertically
-  // centred and the chip is exactly the same height whether or not a
-  // sub is incoming — the chip never grows and the page never shifts.
+  // Name + minutes are one compact stacked unit, vertically centred
+  // in the chip (the old app's group-centred stack, see .sub in
+  // styles.css): the minutes line is always rendered (empty when
+  // absent, collapsing to zero height) and only ever changes text,
+  // never height, so the chip is exactly the same height whether or
+  // not a sub is incoming — the chip never grows and the page never
+  // shifts.
   const mins='<span class="mins">'+((opts.showMinutes&&p!=null&&!removed)?Math.round(totalSec(p)/60)+'m':'')+'</span>';
   const pairIn='<span class="pair">'+(queuedOff?'\u2192 '+esc(S.roster[queuedOff.in].name):'')+'</span>';
   const chipInner='<span>'+name+'</span><span class="sub">'+mins+pairIn+'</span>';
@@ -1711,17 +1735,18 @@ function benchHtml(){
     const q=S.queue.find(x=>x.in===i);
     const sel=S.selection && S.selection.kind==='in' && S.selection.player===i;
     const cls=['', S.roster[i].tired?'tired':'', sel?'selected':'', q?'queued-on':''].join(' ');
-    // Same component treatment as a field chip: the name is the only
-    // in-flow content and centres itself; the minutes and the queued
-    // pairing live in the bottom strip, in the same format as the
-    // field chip ("0m" clean, "0m → Name" queued — the arrow names
-    // the counterpart, the player this one is paired with); the
-    // queued badge is the same brown pill on the top edge ("↑ POS",
-    // the field chip's outgoing badge reads "↓ POS"). The strip is
-    // always rendered (minutes always, pairing only when queued) and
-    // absolutely positioned, so the name stays vertically centred and
-    // the button is exactly the same height whether or not it has a
-    // queued sub — the button never grows.
+    // Same component treatment as a field chip: name + minutes are
+    // one compact stacked unit, vertically centred in the button (the
+    // old app's group-centred stack); the minutes and the queued
+    // pairing read in the same format as the field chip ("0m" clean,
+    // "0m → Name" queued — the arrow names the counterpart, the
+    // player this one is paired with); the queued badge is the same
+    // brown pill on the top edge ("↑ POS", the field chip's outgoing
+    // badge reads "↓ POS"). The minutes line is always rendered
+    // (minutes always, pairing only when queued) and only ever
+    // changes text, never height, so the button is exactly the same
+    // height whether or not it has a queued sub — the button never
+    // grows.
     const name=esc(S.roster[i].name)+(S.roster[i].tired?' <span class="tired-dot">\u25cf</span>':'');
     const badge=q?'<span class="b-badge">\u2191 '+POSITIONS[q.pos]+'</span>':'';
     const mins='<span class="b-mins">'+Math.round(totalSec(i)/60)+'m</span>';
@@ -2565,7 +2590,7 @@ document.addEventListener('click', async (e)=>{
   if(d.joinViewer!==undefined){
     const code=((($('#join-code')||{}).value||'').trim().toUpperCase());
     if(!code){ S.error='Enter the 4-letter view code first.'; render(); return; }
-    await joinViewerCode(code); return;
+    await joinViewerCode(code); render(); return;
   }
   if(d.joinLive!==undefined){
     const code=((($('#join-code')||{}).value||'').trim().toUpperCase());
@@ -3034,13 +3059,16 @@ async function enterApp(){
   render(); // entry screen if gated, match UI otherwise
   // Shared view link (?view=CODE): join it directly, signed in or
   // not — no sign-in needed to watch. A bad code falls through to
-  // the normal entry below, with the error shown.
+  // the normal entry below, with the error shown. joinViewerCode
+  // sets the error but does not render, so each branch below renders
+  // exactly once — a second render would repaint the entry screen
+  // after the error was consumed and swallow the message.
   let viewCode = null;
   try { viewCode = new URLSearchParams(window.location.search).get('view'); } catch (e) { viewCode = null; }
-  if (viewCode && SB.configured) {
+  if (viewCode) {
     const ok = await joinViewerCode(viewCode);
     if (ok) { await routeFromUrl(); /* ?view=CODE&game=... lands in that game */ }
-    else if (authGated()) { /* stay on the entry screen with the error — off the loading screen first, and paint it */ if (S.screen === 'loading') S.screen = 'setup'; render(); }
+    else if (authGated()) { /* stay on the entry screen with the error */ render(); }
     else { await enterApp(); }
     // fall through to the listeners below
   } else if (authGated()) {

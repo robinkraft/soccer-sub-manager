@@ -89,13 +89,16 @@ details summary{font-weight:800;cursor:pointer;min-height:44px;display:flex;alig
   height:48px;padding:2px 2px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;
   font-weight:800;font-size:14px;line-height:1.1;white-space:normal;overflow-wrap:anywhere;width:100%;cursor:pointer}
 .spot .chip>span:first-child{white-space:nowrap}
-/* Minutes + incoming lines live in one absolutely-positioned strip
-   pinned to the bottom of the chip, so they never push the name up:
-   the name is vertically centred in the chip in every state (setup
-   name-only, live minutes, queued "12m → name"). The strip is always
-   rendered (empty when absent) and the chip height stays fixed, so
-   queueing a sub still never shifts anything. */
-.spot .chip .sub{position:absolute;left:2px;right:2px;bottom:1px;display:block;min-height:11px;line-height:1.1;text-align:center}
+/* Name + minutes are ONE compact stacked unit (the old app's look,
+   Robin's call Nov 2026): the name on top, the minutes/incoming line
+   directly beneath it, adjacent — not pinned to the bottom edge —
+   and the whole unit is vertically centred in the chip. The name
+   therefore sits a few px above true geometric centre; that is the
+   intended look, not a bug. The strip is always rendered (empty when
+   absent, and an empty strip collapses to zero height) and the chip
+   height stays fixed, so queueing a sub still never shifts anything:
+   the line only ever changes text ("0m" -> "0m → name"), never height. */
+.spot .chip .sub{position:static;display:block;line-height:1.1;text-align:center}
 .spot .chip .mins,.spot .chip .pair{display:inline}
 .spot .chip .mins{font-size:10px;font-weight:700;color:#475569}
 .spot .chip .pair{margin-left:4px}
@@ -146,18 +149,19 @@ details summary{font-weight:800;cursor:pointer;min-height:44px;display:flex;alig
 .apply-slot .apply{margin:0}
 
 /* Bench — the SAME component treatment as the field chips (Nov 2026):
-   the name is the only in-flow content and centres itself; minutes
-   and the queued pairing live in one absolutely-positioned strip at
-   the bottom, in the same "0m" / "0m → Name" format as the field
-   chip; the queued badge is the same brown pill on the top edge
-   ("↑ POS", the field chip's is "↓ POS"); a queued bench player
-   uses the same pale-yellow highlight as a queued field chip. The
-   only differences left are the backgrounds (white chip on green
-   field vs dark card on navy) — the treatment is identical. */
+   name + minutes are one compact stacked unit, vertically centred
+   in the button (the old app's group-centred stack — see the field
+   chip comment above); the queued pairing reads in the same "0m" /
+   "0m → Name" format as the field chip; the queued badge is the same
+   brown pill on the top edge ("↑ POS", the field chip's is "↓ POS");
+   a queued bench player uses the same pale-yellow highlight as a
+   queued field chip. The only differences left are the backgrounds
+   (white chip on green field vs dark card on navy) — the treatment
+   is identical. */
 .bench{display:flex;flex-wrap:wrap;gap:6px}
 .bench button{flex:1 1 30%;height:46px;padding:3px 8px;font-size:14px;border-radius:12px;line-height:1.1;background:#16283a;border:2px solid var(--line2);color:var(--ink);text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;white-space:normal;overflow-wrap:anywhere}
 .bench button .b-name{font-weight:800;white-space:nowrap}
-.bench button .b-sub{position:absolute;left:2px;right:2px;bottom:1px;display:block;min-height:11px;line-height:1.1;text-align:center}
+.bench button .b-sub{position:static;display:block;line-height:1.1;text-align:center}
 .bench button .b-mins{font-size:10px;font-weight:700;color:var(--muted)}
 .bench button .b-pair{margin-left:4px;font-size:10px;font-weight:800;color:#92400e}
 .bench button .b-badge{position:absolute;top:-9px;left:50%;transform:translateX(-50%);white-space:nowrap;font-size:11px;font-weight:900;background:#78350f;color:#fff;border-radius:999px;padding:2px 7px;line-height:1.3;z-index:2}
