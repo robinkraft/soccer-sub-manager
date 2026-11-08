@@ -996,11 +996,12 @@ function activeGamesHtml(){
     const score = 'US ' + (st.ourScore || 0) + ' – ' + (st.theirScore || 0) + ' THEM';
     // Stacked, not one flex row: the single-line layout squeezed the
     // clock off the right edge ("US 1 – 0 THEM · 20…"). Title on its
-    // own line, score + clock on the next, Join below — nothing can
-    // overflow, at 360px or 390px.
+    // own line, score + clock on the next, Join + Shut down below —
+    // Join grows, Shut down is a small button beside it, so nothing
+    // can overflow, at 360px or 390px.
     return '<div class="card"><strong>There\u2019s a live game in progress</strong>'
       + '<div class="muted">' + esc(score) + ' &middot; ' + fmtClock(activeGameElapsed(st)) + '</div>'
-      + '<div class="row" style="margin-top:8px"><button class="primary grow" data-join-active="' + esc(g.id) + '">Join</button></div></div>';
+      + '<div class="row" style="margin-top:8px"><button class="primary grow" data-join-active="' + esc(g.id) + '">Join</button><button class="small danger" data-shutdown-game="' + esc(g.id) + '">Shut down</button></div></div>';
   }).join('');
 }
 async function joinActiveGame(row){
@@ -1177,27 +1178,38 @@ async function finishLiveGame() {
 /* Shut down a live game (signed-in coach only): delete the live_games
    row and drop the local game — it is NOT saved to history. Different
    from End game, which finishes and saves. For a stale test game or
-   an abandoned game. Anonymous viewers never see the control and the
-   DELETE policy (schema.sql / add-live-delete.sql) is authenticated-
-   only, so a viewer cannot call it either. */
-async function shutdownLiveGame(){
+   an abandoned game. The control lives ONLY on the landing screen
+   (setup), next to each active-game note's Join button — never in the
+   game view. Anonymous viewers never see the control and the DELETE
+   policy (schema.sql / add-live-delete.sql) is authenticated-only,
+   so a viewer cannot call it either. */
+async function shutdownLiveGame(gameId){
   if (!SB.authUser) return;
-  const liveId = SB.liveId;
-  if (liveId && SB.configured) {
-    unsubscribeLive(); // do not hear our own DELETE echo
-    try {
-      const { error } = await SB.client.from('live_games').delete().eq('id', liveId);
-      if (error) throw error;
-    } catch (e) {
-      subscribeLive(); // back on the game — the shutdown did not go through
-      S.error = 'Could not shut down the live game — check connection and try again.';
-      render(); return;
-    }
+  // The landing screen passes the game's id. (An open game would
+  // pass its own id too — the same path shuts down whichever game
+  // the coach picked, without opening it first.)
+  const id = gameId || SB.liveId;
+  if (!id || !SB.configured) return;
+  const isOpenGame = id === SB.liveId;
+  if (isOpenGame) unsubscribeLive(); // do not hear our own DELETE echo
+  try {
+    const { error } = await SB.client.from('live_games').delete().eq('id', id);
+    if (error) throw error;
+  } catch (e) {
+    if (isOpenGame) subscribeLive(); // back on the game — the shutdown did not go through
+    S.error = 'Could not shut down the live game — check connection and try again.';
+    render(); return;
   }
-  // Back to setup, keeping history, roster, settings and team name —
-  // same as starting a new game, but nothing was saved.
-  startNewGame();
-  replaceUrl(homeUrl()); // the shut-down game's URL is stale
+  if (isOpenGame) {
+    // Back to setup, keeping history, roster, settings and team name —
+    // same as starting a new game, but nothing was saved.
+    startNewGame();
+    replaceUrl(homeUrl()); // the shut-down game's URL is stale
+  } else {
+    // Shut down from the landing screen: just drop the note.
+    SB.activeGames = (SB.activeGames || []).filter(g => g && g.id !== id);
+    if (S.screen === 'setup') render();
+  }
   showToast('Live game shut down');
 }
 /* Another coach shut the game down (or the row was deleted some other
@@ -1950,12 +1962,18 @@ function setupHtml(){
   let body='';
   if(S.setupTab==='lineup'){
     const bench=S.roster.map((r,i)=>i).filter(i=>!S.lineup.includes(i)&&S.roster[i].present);
+    // Same completeness rule as Start: Review & start is disabled
+    // (visibly, not just refusing on tap) until every required spot
+    // is filled — all 7, or the 6 remaining in short mode. The hint
+    // names the empty spots so the coach knows what is missing.
+    const emptyReview = emptySpotsLabel();
     body='<div class="card"><h3>Join a live game</h3><p class="muted">Enter the 4-letter game code from the driver\u2019s phone.</p>'
       +'<div class="row"><input type="text" id="join-code" placeholder="Game code" maxlength="4" autocapitalize="characters" autocomplete="off" style="width:110px;text-transform:uppercase"><button class="primary" data-join-live>Join live game</button></div></div>'
       +'<div class="card"><div class="row spread"><span><strong>Preferred lineup</strong> <span class="muted">&middot; '+(S.preferredLineup?'Ready':'Not set')+'</span></span><button class="small" data-manage-preferred>Manage</button></div>'
       +(lastBtn?'<div class="row" style="margin-top:8px">'+lastBtn+'</div>':'')
       +'</div>'
-      +'<div class="row"><button class="primary grow" data-auto>Refresh lineup</button><button class="primary grow" data-review>Review &amp; start</button><button class="ghost small" data-clear-lineup>Clear</button></div>'
+      +'<div class="row"><button class="primary grow" data-auto>Refresh lineup</button><button class="primary grow" data-review'+(emptyReview?' disabled':'')+'>Review &amp; start</button><button class="ghost small" data-clear-lineup>Clear</button></div>'
+      +(emptyReview?'<p class="muted">Fill '+esc(emptyReview)+' to review &amp; start.</p>':'')
       +'<div class="field-wrap">'+fieldHtml({})+'</div>'
       +'<p class="muted" style="text-align:center">Tap a spot to choose a player</p>'
       +'<p class="muted"><strong>OPENING BENCH</strong> &mdash; '+(bench.length?bench.map(i=>esc(S.roster[i].name)).join(', '):'none')+'</p>';
@@ -2064,13 +2082,13 @@ function liveHtml(){
     body='<h2>Team — player status</h2><p class="muted">Alphabetical. Notes are private.</p>'+teamRowsHtml()
       +'<h3>Starting lineup (read-only)</h3><div class="field-wrap" style="position:static">'+fieldHtml({readonly:true})+'</div>';
   }
-  // Top row: only the contextual Undo and the coach-only Shut down
-  // link. Halftime / End game moved to large buttons at the bottom
-  // of the live screen (Robin's call, Nov 2026 — the small text
-  // links under the scoreboard were too small to tap). The row
-  // renders only when it has something in it, so it never leaves a gap.
+  // Top row: only the contextual Undo link. Halftime / End game
+  // moved to large buttons at the bottom of the live screen
+  // (Robin's call, Nov 2026 — the small text links under the
+  // scoreboard were too small to tap), and Shut down lives only on
+  // the landing screen, never in the game view. The row renders
+  // only when it has something in it, so it never leaves a gap.
   const topLinks = [];
-  if (SB.authUser) topLinks.push('<button class="linklike danger-link" data-shutdown>Shut down game</button>');
   if (S.undoStack.length) topLinks.push('<button class="linklike" data-undo>Undo '+esc(S.undoStack[S.undoStack.length-1].label)+'</button>');
   const gameActions = topLinks.length ? '<div class="game-actions">'+topLinks.join('<span aria-hidden="true">&middot;</span>')+'</div>' : '';
   return '<section aria-label="Live game">'
@@ -2236,7 +2254,7 @@ function startSecondHalf(){
 
 /* ---------- Events (delegation) ---------- */
 document.addEventListener('click', async (e)=>{
-  const t=e.target.closest('[data-spot],[data-bench],[data-tab],[data-pick],[data-scorer],[data-step],[data-close],[data-clear-spot],[data-save-note],[data-pref],[data-remove-pos],[data-goal-minus],[data-goal-plus],[data-goal-del],[data-tired],[data-note],[data-prefs],[data-rename],[data-save-rename],[data-add-player],[data-save-add-player],[data-remove-player],[data-save-roster],[data-attend],[data-unqueue],[data-csv],[data-editgoals],[data-auto],[data-refresh],[data-review],[data-back-setup],[data-start-game],[data-pause],[data-plus2],[data-halftime],[data-end],[data-shutdown],[data-undo],[data-apply],[data-clear-queue],[data-suggest],[data-edit-lineup],[data-play-short],[data-full-strength],[data-edit-goals],[data-do-swap],[data-plan-refresh],[data-plan-use],[data-start-second],[data-snap-clock],[data-back-live],[data-goto-signin],[data-join-viewer],[data-join-viewer-game],[data-share-viewer],[data-join-active],[data-gen-viewer-link],[data-copy-viewer-link],[data-leave-live],[data-new-game],[data-csv-last],[data-editgoals-last],[data-confirm-yes],[data-last-lineup],[data-use-preferred],[data-save-preferred],[data-score],[data-signin],[data-signout],[data-close-history],[data-discard-game],[data-leaving],[data-arrived],[data-setup-tab],[data-details],[data-season-csv],[data-all-history-csv],[data-export-roster],[data-clear-lineup],[data-clear-preferred],[data-manage-preferred],[data-more],[data-pref-inline],[data-halftime-prefs],[data-join-live]');
+  const t=e.target.closest('[data-spot],[data-bench],[data-tab],[data-pick],[data-scorer],[data-step],[data-close],[data-clear-spot],[data-save-note],[data-pref],[data-remove-pos],[data-goal-minus],[data-goal-plus],[data-goal-del],[data-tired],[data-note],[data-prefs],[data-rename],[data-save-rename],[data-add-player],[data-save-add-player],[data-remove-player],[data-save-roster],[data-attend],[data-unqueue],[data-csv],[data-editgoals],[data-auto],[data-refresh],[data-review],[data-back-setup],[data-start-game],[data-pause],[data-plus2],[data-halftime],[data-end],[data-shutdown-game],[data-undo],[data-apply],[data-clear-queue],[data-suggest],[data-edit-lineup],[data-play-short],[data-full-strength],[data-edit-goals],[data-do-swap],[data-plan-refresh],[data-plan-use],[data-start-second],[data-snap-clock],[data-back-live],[data-goto-signin],[data-join-viewer],[data-join-viewer-game],[data-share-viewer],[data-join-active],[data-gen-viewer-link],[data-copy-viewer-link],[data-leave-live],[data-new-game],[data-csv-last],[data-editgoals-last],[data-confirm-yes],[data-last-lineup],[data-use-preferred],[data-save-preferred],[data-score],[data-signin],[data-signout],[data-close-history],[data-discard-game],[data-leaving],[data-arrived],[data-setup-tab],[data-details],[data-season-csv],[data-all-history-csv],[data-export-roster],[data-clear-lineup],[data-clear-preferred],[data-manage-preferred],[data-more],[data-pref-inline],[data-halftime-prefs],[data-join-live]');
   if(!t) return;
   const d=t.dataset;
 
@@ -2423,9 +2441,13 @@ document.addEventListener('click', async (e)=>{
   if(d.auto!==undefined){ S.lineup=autoLineup(false); S.removedPositions=[]; S.shortMode=false; render(); return; }
   if(d.refresh!==undefined){ S.lineup=autoLineup(false); S.removedPositions=[]; S.shortMode=false; render(); return; }
   if(d.review!==undefined){
-    // Kickoff review is reachable with holes — the review screen
-    // itself names the empty spots and blocks Start game until they
-    // are filled, so the coach can see exactly what is missing.
+    // Defence in depth for the disabled button: the review screen
+    // is only reachable with a complete lineup. The setup screen
+    // disables Review & start and names the empty spots; a tap that
+    // somehow gets through (stale render, keyboard) stays on setup
+    // with the same message instead of opening review with holes.
+    const empty = emptySpotsLabel();
+    if (empty) { S.error='Fill '+empty+' to review & start.'; render(); return; }
     S.screen='review'; render(); return;
   }
   if(d.backSetup!==undefined){
@@ -2476,11 +2498,13 @@ document.addEventListener('click', async (e)=>{
     openConfirm({title:'End the game?', body:'The finished summary and CSV will be saved to this session’s history.', confirmLabel:'End game', onConfirm:()=>{ finishGame(); }});
     return;
   }
-  if(d.shutdown!==undefined){
-    // Coach-only: the button is not rendered for anonymous viewers,
-    // and the viewer edit gate above blocks the action too — but the
-    // handler also checks: shutdownLiveGame() returns unless signed in.
-    openConfirm({title:'Shut down this game?', body:'The live game will be discarded and not saved to history. Finished games in history, the roster, and settings are kept.', confirmLabel:'Shut down game', danger:true, onConfirm:()=>{ shutdownLiveGame(); }});
+  if(d.shutdownGame!==undefined){
+    // Coach-only, landing screen only: the button renders only on
+    // the active-game note for a signed-in coach, and
+    // shutdownLiveGame() returns unless signed in. The confirm sheet
+    // states the game is discarded, not saved to history.
+    const id = d.shutdownGame;
+    openConfirm({title:'Shut down this game?', body:'The live game will be discarded and not saved to history. Finished games in history, the roster, and settings are kept.', confirmLabel:'Shut down game', danger:true, onConfirm:()=>{ shutdownLiveGame(id); }});
     return;
   }
   if(d.undo!==undefined){ undoLast(); return; }
