@@ -1458,11 +1458,13 @@ function fieldSpotHtml(pos, opts){
   // A queued-in player is shown inside the chip ("-> name"), with the
   // position badge on the chip's top edge — never as a line under it.
   // Minutes and incoming lines are always rendered (empty when
-  // absent) so a chip is exactly the same height whether or not a sub
-  // is incoming — the chip never grows and the page never shifts.
+  // absent) inside one absolutely-positioned strip at the bottom of
+  // the chip (see .sub in styles.css), so the name stays vertically
+  // centred and the chip is exactly the same height whether or not a
+  // sub is incoming — the chip never grows and the page never shifts.
   const mins='<span class="mins">'+((opts.showMinutes&&p!=null&&!removed)?Math.round(totalSec(p)/60)+'m':'')+'</span>';
   const pairIn='<span class="pair">'+(queuedOff?'\u2192 '+esc(S.roster[queuedOff.in].name):'')+'</span>';
-  const chipInner='<span>'+name+'</span>'+mins+pairIn;
+  const chipInner='<span>'+name+'</span><span class="sub">'+mins+pairIn+'</span>';
   const inner=opts.readonly
     ? '<div class="'+cls+'">'+chipInner+'</div>'
     : '<button class="'+cls+'" data-spot="'+pos+'" aria-label="'+POSITIONS[pos]+' '+(name||'empty')+'">'+chipInner+'</button>';
@@ -1503,8 +1505,10 @@ function benchHtml(){
       ? '<span class="b-name">'+name+'</span><span class="b-badge">\u2191 '+POSITIONS[q.pos]+'</span>'
       : '<span class="b-name">'+name+'</span><span class="b-mins">'+Math.round(totalSec(i)/60)+'m</span>';
     // The "for <out>" line is always rendered (empty when no sub is
-    // incoming) so a bench button is exactly the same height whether
-    // or not it has a queued sub — the button never grows.
+    // incoming) and absolutely positioned at the bottom of the button
+    // (see .b-sub in styles.css), so the name stays vertically
+    // centred and the button is exactly the same height whether or
+    // not it has a queued sub — the button never grows.
     const sub='<span class="b-sub">'+(q?'for '+esc(S.roster[q.out].name):'')+'</span>';
     return '<button class="'+cls+'" data-bench="'+i+'">'+top+sub+'</button>';
   }).join('')+'</div>';

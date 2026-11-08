@@ -89,8 +89,16 @@ details summary{font-weight:800;cursor:pointer;min-height:44px;display:flex;alig
   height:48px;padding:2px 2px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;
   font-weight:800;font-size:14px;line-height:1.1;white-space:normal;overflow-wrap:anywhere;width:100%;cursor:pointer}
 .spot .chip>span:first-child{white-space:nowrap}
-.spot .chip .mins,.spot .chip .pair{display:block;min-height:11px;line-height:1.1}
+/* Minutes + incoming lines live in one absolutely-positioned strip
+   pinned to the bottom of the chip, so they never push the name up:
+   the name is vertically centred in the chip in every state (setup
+   name-only, live minutes, queued "12m → name"). The strip is always
+   rendered (empty when absent) and the chip height stays fixed, so
+   queueing a sub still never shifts anything. */
+.spot .chip .sub{position:absolute;left:2px;right:2px;bottom:1px;display:block;min-height:11px;line-height:1.1;text-align:center}
+.spot .chip .mins,.spot .chip .pair{display:inline}
 .spot .chip .mins{font-size:10px;font-weight:700;color:#475569}
+.spot .chip .pair{margin-left:4px}
 .spot .chip.empty{background:rgba(255,255,255,.18);color:#fff;border-style:dashed;border-color:#fff;font-weight:700}
 .spot .chip.removed{background:rgba(0,0,0,.3);color:#fff;border-style:dashed}
 .spot .chip.tired{box-shadow:inset 0 0 0 3px #f97316}
@@ -127,7 +135,7 @@ details summary{font-weight:800;cursor:pointer;min-height:44px;display:flex;alig
 
 /* Bench — dark cards, queued-in highlighted pale green */
 .bench{display:flex;flex-wrap:wrap;gap:6px}
-.bench button{flex:1 1 30%;height:46px;padding:3px 8px;font-size:14px;border-radius:12px;line-height:1.2;white-space:normal;overflow-wrap:anywhere;background:#16283a;border-color:var(--line2);color:var(--ink);text-align:left;display:flex;flex-wrap:wrap;align-items:center;align-content:center;justify-content:space-between;gap:0 6px}
+.bench button{flex:1 1 30%;height:46px;padding:3px 8px;font-size:14px;border-radius:12px;line-height:1.2;white-space:normal;overflow-wrap:anywhere;background:#16283a;border-color:var(--line2);color:var(--ink);text-align:left;display:flex;flex-wrap:wrap;align-items:center;align-content:center;justify-content:space-between;gap:0 6px;position:relative}
 .bench button .b-name{font-weight:800;white-space:nowrap}
 .bench button .b-mins{color:var(--muted);font-size:13px;font-weight:700}
 .bench button .b-badge{background:#166534;color:#fff;border-radius:999px;font-size:10px;font-weight:900;padding:1px 5px}
@@ -135,7 +143,11 @@ details summary{font-weight:800;cursor:pointer;min-height:44px;display:flex;alig
 .bench button.queued-on{background:var(--green-bg);color:#052e16;border-color:#166534}
 .bench button.queued-on .b-mins{color:#166534}
 .bench button.tired{border-color:#f97316;box-shadow:inset 0 0 0 2px #f97316}
-.bench .b-sub{flex-basis:100%;display:block;min-height:12px;line-height:1.2;font-size:11px;font-weight:700;color:#166534;text-align:left}
+/* "for <out>" line: absolutely positioned at the bottom of the
+   button, so it never pushes the name up — the name + minutes row
+   stays vertically centred whether or not a sub is queued. Always
+   rendered (empty when absent); button height stays fixed. */
+.bench .b-sub{position:absolute;left:8px;right:8px;bottom:2px;display:block;min-height:12px;line-height:1.2;font-size:11px;font-weight:700;color:#166534;text-align:left}
 /* Bench heading: "Bench" left, small hint right (private app) */
 .bench-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:6px 0 4px}
 .bench-head h3{margin:0}
