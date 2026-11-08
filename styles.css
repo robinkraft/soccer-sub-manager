@@ -114,18 +114,30 @@ details summary{font-weight:800;cursor:pointer;min-height:44px;display:flex;alig
    the old app's penalty-box proportion (measured from the old app's
    screenshot: like a real field, the goal area only covers the area
    near the goal, not the full width).
-   The GK chip stays centred inside it. */
-.field .gk-box{width:42%;margin:2px auto 0;border:2px solid rgba(255,255,255,.55);border-radius:8px;padding:2px 0 0}
+   It is NOT a freestanding rectangle: its bottom side IS the goal
+   line. The box sits flush against the end of the field — a negative
+   bottom margin pulls the field's bottom edge up to the box's bottom
+   edge (8px field padding + 3px field border = 11px), it has no
+   bottom border (the field's own bottom border is its bottom side),
+   and its bottom corners are square. The 4px bottom padding blocks
+   the GK row's margin from collapsing through, so the box bottom
+   lands exactly on the field's outer bottom edge and the GK chip
+   still clears the goal line. The GK chip stays centred inside it. */
+.field .gk-box{width:42%;margin:2px auto -11px;border:2px solid rgba(255,255,255,.55);border-bottom:none;border-radius:8px 8px 0 0;padding:2px 0 4px}
 
 /* Swap button inside the field (live Actions only): absolute overlay
    in the field's bottom-right corner — zero vertical space, nothing
    shifts when it appears. One big button (no Cancel — tapping a
    staged player un-stages them and the button goes away). The GK chip
    is centred, so the field's bottom-right corner is empty: at 360px
-   the button clears the chip by ~9px, at 390px by ~24px. The goal
+   the button clears the chip by ~12px, at 390px by ~27px. The goal
    box is only 42% wide, so the button sits on the green outside it,
-   in the field corner. */
-.field-swap{position:absolute;right:6px;bottom:6px;z-index:3}
+   in the field corner. right:0 puts the button flush against the
+   field's inner right edge (6px padding + 3px border still inset it
+   from the field's outer edge) — at 360px the button used to sit
+   ~2.6px over the goal box's right border line; flush, it clears
+   the border by ~3px and the GK chip by ~12px. */
+.field-swap{position:absolute;right:0;bottom:6px;z-index:3}
 .field-swap button{min-height:48px;min-width:96px;padding:8px 14px;font-size:16px;border-radius:12px;white-space:nowrap}
 /* Reserved slot on the live Actions tab: fixed height whether or not
    the Apply button is showing, so queueing a sub never moves
