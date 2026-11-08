@@ -76,14 +76,16 @@ details summary{font-weight:800;cursor:pointer;min-height:44px;display:flex;alig
 .tabs button[aria-selected="true"]{background:var(--yellow);color:var(--yellow-ink);border-color:var(--yellow-ring);box-shadow:0 0 0 2px var(--yellow-ring)}
 
 /* Field — same component on setup / review / live / finished */
-.field-wrap{position:sticky;top:0;z-index:10;background:var(--bg);padding:2px 0 4px}
+.field-wrap{position:sticky;top:0;z-index:10;background:var(--bg);padding:2px 0 2px}
 .field{background:linear-gradient(180deg,var(--field),var(--field-dark));border:3px solid #e2e8f0;border-radius:16px;padding:8px 6px;color:#fff;position:relative}
 .field .f-row{position:relative;z-index:1;display:flex;gap:6px;justify-content:center;margin:4px 0}
 .field .f-row.mid{justify-content:space-between}
-.spot{flex:1;max-width:118px;min-width:0}
+.spot{flex:1;max-width:118px;min-width:0;position:relative}
 .spot .chip{position:relative;background:#fff;color:#0f172a;border:2px solid #0f172a;border-radius:12px;
-  min-height:46px;padding:4px 2px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;
+  height:60px;padding:4px 2px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;
   font-weight:800;font-size:15px;line-height:1.15;white-space:normal;overflow-wrap:anywhere;width:100%;cursor:pointer}
+.spot .chip>span:first-child{white-space:nowrap}
+.spot .chip .mins,.spot .chip .pair{display:block;min-height:13px;line-height:1.15}
 .spot .chip .mins{font-size:11px;font-weight:700;color:#475569}
 .spot .chip.empty{background:rgba(255,255,255,.18);color:#fff;border-style:dashed;border-color:#fff;font-weight:700}
 .spot .chip.removed{background:rgba(0,0,0,.3);color:#fff;border-style:dashed}
@@ -98,35 +100,46 @@ details summary{font-weight:800;cursor:pointer;min-height:44px;display:flex;alig
 .pair{font-size:11px;font-weight:800;color:#92400e}
 .field .gk-box{border:2px solid rgba(255,255,255,.55);border-radius:8px;padding:2px 0 0;margin-top:2px}
 
-/* Reserved slots on the live Actions tab: fixed height whether or not
-   their buttons are showing, so staging/executing a swap or queuing a
-   sub never moves the bench, the Apply button, or anything below. */
-.swap-slot{min-height:44px;margin-top:8px;display:flex;align-items:center}
-.swap-slot .row{margin:0}
-.apply-slot{min-height:66px;margin-top:10px;display:flex;align-items:center}
+/* Swap buttons inside the field (live Actions only): absolute overlay
+   in the field's bottom-right corner — zero vertical space, nothing
+   shifts when they appear. The GK chip is centred, so the corner of
+   the goal box is empty. */
+.field-swap{position:absolute;right:6px;bottom:6px;z-index:3;display:flex;flex-direction:column;gap:4px;align-items:stretch}
+.field-swap button{min-height:30px;min-width:88px;padding:2px 8px;font-size:12px;border-radius:8px;white-space:nowrap}
+.field-swap button.ghost{background:rgba(10,22,34,.88);color:#f1f5f9;border-color:rgba(255,255,255,.65)}
+/* Reserved slot on the live Actions tab: fixed height whether or not
+   the Apply button is showing, so queueing a sub never moves
+   anything below it. */
+.apply-slot{min-height:58px;margin-top:6px;display:flex;align-items:center}
 .apply-slot .apply{margin:0}
 
 /* Bench — dark cards, queued-in highlighted pale green */
 .bench{display:flex;flex-wrap:wrap;gap:6px}
-.bench button{flex:1 1 30%;min-height:44px;padding:6px 10px;font-size:15px;border-radius:12px;line-height:1.2;white-space:normal;overflow-wrap:anywhere;background:#16283a;border-color:var(--line2);color:var(--ink);text-align:left;display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:0 6px}
-.bench button .b-name{font-weight:800}
+.bench button{flex:1 1 30%;height:56px;padding:6px 8px;font-size:14px;border-radius:12px;line-height:1.2;white-space:normal;overflow-wrap:anywhere;background:#16283a;border-color:var(--line2);color:var(--ink);text-align:left;display:flex;flex-wrap:wrap;align-items:center;align-content:center;justify-content:space-between;gap:0 6px}
+.bench button .b-name{font-weight:800;white-space:nowrap}
 .bench button .b-mins{color:var(--muted);font-size:13px;font-weight:700}
-.bench button .b-badge{background:#166534;color:#fff;border-radius:999px;font-size:11px;font-weight:900;padding:1px 7px}
+.bench button .b-badge{background:#166534;color:#fff;border-radius:999px;font-size:10px;font-weight:900;padding:1px 5px}
 .bench button.selected{background:#fef9c3;color:#78350f;border-color:var(--yellow-ring)}
 .bench button.queued-on{background:var(--green-bg);color:#052e16;border-color:#166534}
 .bench button.queued-on .b-mins{color:#166534}
 .bench button.tired{border-color:#f97316;box-shadow:inset 0 0 0 2px #f97316}
-.bench .b-sub{flex-basis:100%;font-size:12px;font-weight:700;color:#166534;text-align:left}
+.bench .b-sub{flex-basis:100%;display:block;min-height:14px;line-height:1.2;font-size:12px;font-weight:700;color:#166534;text-align:left}
 /* Bench heading: "Bench" left, small hint right (private app) */
-.bench-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:10px 0 6px}
+.bench-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:6px 0 4px}
 .bench-head h3{margin:0}
 .bench-head .small{text-align:right}
 
 /* Queue */
-.queue-item{display:flex;gap:8px;align-items:center;background:#16283a;border:2px solid var(--line2);border-radius:12px;padding:10px;margin:6px 0;font-weight:700}
+.queue-item{display:flex;gap:8px;align-items:center;background:#16283a;border:2px solid var(--line2);border-radius:12px;padding:6px 10px;margin:4px 0;font-weight:700}
 .queue-item .arrow{font-size:20px;color:var(--green)}
 .queue-item .q-num{background:var(--green);color:#052e16;border-radius:50%;min-width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;font-weight:900}
 .queue-item button{margin-left:auto}
+/* Compact queue area: tight gaps around Apply, Next change and the
+   action buttons so there is no dead space below the field. */
+.queue-area h3{margin:8px 0 2px}
+.queue-area p{margin:2px 0 4px}
+.queue-area .row{margin-top:4px}
+.row.actions-row{margin-top:6px}
 
 /* Minutes / team rows — dark cards */
 .mrow{display:flex;gap:8px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px;margin:6px 0}
@@ -191,3 +204,10 @@ button.xs{min-height:32px;padding:2px 9px;font-size:13px;border-radius:8px;flex:
 .roster-row{padding:12px}
 .two-col{columns:2;column-gap:12px}
 .two-col .mrow{break-inside:avoid}
+
+/* Live-update toast: a small pill fixed near the top of the screen.
+   position:fixed keeps it OUT of the page flow entirely — it never
+   pushes the field, bench, or Apply button down, and it fades away
+   on its own. pointer-events:none so it can never block a tap. */
+.live-toast{position:fixed;top:10px;left:50%;transform:translateX(-50%) translateY(-6px);background:#14532d;color:#bbf7d0;border:1px solid #22c55e;border-radius:999px;padding:6px 14px;font-size:13px;font-weight:800;letter-spacing:.2px;opacity:0;pointer-events:none;transition:opacity .35s ease,transform .35s ease;z-index:60;white-space:nowrap}
+.live-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}

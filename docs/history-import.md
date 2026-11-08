@@ -1,13 +1,18 @@
 # History import — private app's 10 past games → Supabase `game_history`
 
-Status: **dry-run done, SQL ready, not yet run.** The private app's
-all-history export (10 games: Sep 19–Nov 7, 2026) was parsed and
-`import.sql` generated in the import folder; totals verified against
-the export's own Season totals section. No historical rows have been
-inserted yet — Robin runs `import.sql` in the Supabase SQL Editor.
-The private app now has the same **Export all history** and
-**Export roster** buttons as this app, so its export is the migration
-source.
+Status: **done — 10 games imported 2026-11-07.** Robin ran the
+regenerated `import.sql` in the Supabase SQL Editor and confirmed
+"Got everything in." Season totals still to be verified against the
+private app. The private app now has the same **Export all history**
+and **Export roster** buttons as this app, so its export is the
+migration source.
+
+**Roster seeding:** `roster.sql` in the import folder (generated from
+the private app's roster export: 13 players with preferred positions
+and notes, plus the preferred lineup) seeds the single
+`team_roster` row. Run order in the SQL Editor: (1)
+`supabase/add-private-parity.sql` (adds `preferred_lineup`), (2)
+`roster.sql`, (3) `import.sql`.
 
 ## Why a CSV import (not a direct read)
 
@@ -72,6 +77,11 @@ the number.
   app (which re-saves the row and updates Season totals). In the
   all-history path, `elapsed_seconds` is the file's played time; in
   the per-game path it is 0 (unknown for old games).
+- **Unknown-scorer goals:** the import tops up only the US side
+  against the score — opponent goals are never recorded as unknown
+  entries (there is no scorer to assign), and the app does not list
+  unknown opponent goals anywhere (Goals list, Edit goals, CSV
+  Goals sections). The score itself carries the full tally.
 - **Export roster** is a roster backup / transfer file only — the
   import script does not import rosters (the roster lives in
   Supabase `team_roster` and is edited in the app).

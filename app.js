@@ -70,7 +70,7 @@ function freshState(){
   return {
     screen:'setup',            // setup | review | live | halftime | finished
     setupTab:'lineup',         // lineup | roster | settings | history (setup tabs, private app)
-    liveTab:'actions',         // actions | minutes | team | positions (live tabs, private app)
+    liveTab:'actions',         // actions | minutes | team (live tabs; the Positions tab was dropped Nov 2026 — prefs are edited on the setup Roster tab, and the Team tab rows already show each player's prefs)
     expandedHistory:{},        // history index -> true when its Details card is open
     planCount:1,               // halftime "Lineup N" counter
     teamName:TEAM_DEFAULT,
@@ -130,9 +130,24 @@ const SB = {
   online: (typeof navigator !== 'undefined' ? navigator.onLine !== false : true),
   historyLoaded: false, historyError: '',
   liveId: null, liveCode: null, liveVersion: 0, role: null, // 'driver' | 'viewer' | null
-  channel: null, syncTimer: null, conflict: null, offline: false,
+  channel: null, syncTimer: null, offline: false,
   viewerAnchor: null, // {elapsedAtAnchor, anchorStartedAt, running} from the driver
   applyingRemote: false,
+  suppressSyncOnce: false,
+  // Set when a remote update was just applied: the render that
+  // follows must NOT schedule a sync of the applied state back —
+  // otherwise two drivers would bounce the same version back and
+  // forth forever. Consumed (and cleared) by render().
+  // Viewer mode (anonymous watching via viewer_access): joined with a
+  // viewer code, not a game code. Polls the function (anon has no
+  // Realtime on live_games) instead of subscribing.
+  viewerMode: false, viewerTimer: null, viewerHistoryJson: '', viewerJoinedCode: '',
+  viewerLives: [], // live games returned by viewer_access for this code
+  // Share code the coach generated (Settings → Share a view link).
+  viewerCode: '', viewerCodeLoaded: false, viewerCodeLoading: false,
+  // Active live games, for the "there's a live game" note on setup:
+  // loaded once per sign-in (coaches only), never for viewers.
+  activeGames: [], activeGamesLoaded: false, activeGamesLoading: false,
   authUser: null, authChecked: false, authError: '', authListener: null,
   authLastEmail: '', // in-memory only, pre-fills the login email after a failed attempt
   // Team roster (Supabase team_roster, authenticated-only).
@@ -166,12 +181,18 @@ function initBackend() {
   }
 }
 
-/* ---------- Supabase Auth (login-required) ---------- */
-/* Email + password, gated before any history/live access. RLS on
-   game_history and live_games is authenticated-only, so the anon key
-   alone gets nothing. Coach accounts are created by Robin in the
-   Supabase dashboard (Authentication → Users → Add user); the app
-   never creates users and never needs a service_role key.
+/* ---------- Supabase Auth (login-required for coaches) ---------- */
+/* Email + password, gated before any history/roster/live-driving
+   access. RLS on game_history and team_roster is authenticated-only,
+   and live_games writes are authenticated-only too — so the anon key
+   alone gets nothing there. The ONE exception: watching a live game.
+   live_games has an anon SELECT policy (see supabase/schema.sql and
+   supabase/add-anon-live-view.sql), so anyone with the 4-letter game
+   code can join as a view-only watcher WITHOUT signing in — they see
+   the live field, bench, score and clock from the live snapshot, and
+   nothing else. Coach accounts are created by Robin in the Supabase
+   dashboard (Authentication → Users → Add user); the app never
+   creates users and never needs a service_role key.
    Session: stored by the Supabase client in localStorage by default
    and cleared on Sign out — a coach stays signed in across reloads.
    Game/history data is never stored in browser storage. */
@@ -216,7 +237,7 @@ function loginHtml() {
   // sign-in does not make the coach retype it — only the password.
   const emailVal = SB.authLastEmail ? ' value="' + esc(SB.authLastEmail) + '"' : '';
   return '<section aria-label="Sign in"><h2>Sign in to Sub Manager</h2>'
-    + '<p class="muted">Coaches only — sign in to see history and join a live game.</p>'
+    + '<p class="muted">Coaches only — sign in to see history, the roster, and drive a game. Watching a live game needs no sign-in: enter its code above.</p>'
     + err
     + '<div class="card"><label for="auth-email">Email</label>'
     + '<input type="email" id="auth-email" autocomplete="email" placeholder="you@example.com"' + emailVal + '>'
@@ -224,6 +245,15 @@ function loginHtml() {
     + '<input type="password" id="auth-password" autocomplete="current-password" placeholder="Password"></p>'
     + '<div class="row"><button class="primary grow" data-signin>Sign in</button></div></div>'
     + '<p class="muted small">You stay signed in on this device until you sign out.</p></section>';
+}
+/* Entry screen for anyone not signed in: join a live game with its
+   code (no account needed, view-only) or sign in as a coach. */
+function entryHtml() {
+  return '<section aria-label="Watch or sign in"><h2>Watch a live game</h2>'
+    + '<div class="card"><h3>Join a shared view</h3><p class="muted">Enter the 4-letter view code from the coach\u2019s shared link. No account needed — you watch live and see history, view-only.</p>'
+    + '<div class="row"><input type="text" id="join-code" placeholder="View code" maxlength="4" autocapitalize="characters" autocomplete="off" style="width:110px;text-transform:uppercase"><button class="primary" data-join-viewer>Watch</button></div></div>'
+    + loginHtml()
+    + '</section>';
 }
 async function signInWithPassword(email, password) {
   if (!SB.configured || !SB.client) return false;
@@ -536,7 +566,7 @@ function applyLiveState(st) {
       S.roster = st.roster.map(r => ({ name: r.name, prefs: [...(r.prefs || [])], present: !!r.present, tired: !!r.tired, note: r.note || '' }));
     }
     const n = S.roster.length;
-    if (Array.isArray(st.lineup)) S.lineup = padArr(st.lineup.map(x => x == null ? null : x), 7, null);
+    if (Array.isArray(st.lineup)) S.lineup = padArr(dedupeLineup(st.lineup.map(x => x == null ? null : x)), 7, null);
     S.removedPositions = Array.isArray(st.removedPositions) ? [...st.removedPositions] : [];
     S.shortMode = !!st.shortMode;
     if (typeof st.ourScore === 'number') S.ourScore = st.ourScore;
@@ -589,17 +619,22 @@ function unsubscribeLive() {
 }
 function handleRemoteLive(row) {
   if (!row || row.last_writer_id === WRITER_ID) return; // ignore our own echo
-  if (SB.role === 'viewer') {
-    SB.liveVersion = row.version; SB.liveId = row.id;
-    applyLiveState(row.state);
-    if (row.phase === 'halftime') S.screen = 'halftime';
-    else if (row.phase === 'finished') { S.screen = 'finished'; }
-    else if (S.screen !== 'live') S.screen = 'live';
-    render();
-  } else if (SB.role === 'driver') {
-    // Someone else moved the row past the version we last saw.
-    if (row.version > SB.liveVersion) { SB.conflict = { row }; render(); }
-  }
+  if (row.version < SB.liveVersion) return; // stale delivery, ignore it
+  // Live at all times: a new version applies immediately, no banner,
+  // no reload tap. Writer identity is per session — WRITER_ID is
+  // random per page load — so Robin signed in on two devices is the
+  // same person, not "the other coach": the note just says "Updated".
+  // Any signed-in coach can drive, so there is no Take over and no
+  // view-only for coaches; only anonymous viewers are view-only.
+  const isNewer = row.version > SB.liveVersion;
+  SB.liveVersion = row.version; SB.liveId = row.id;
+  applyLiveState(row.state);
+  if (row.phase === 'halftime') S.screen = 'halftime';
+  else if (row.phase === 'finished') { S.screen = 'finished'; }
+  else if (S.screen !== 'live') S.screen = 'live';
+  if (isNewer) showToast('Updated');
+  SB.suppressSyncOnce = true; // do not sync the applied state back
+  render();
 }
 async function startLiveDriver() {
   if (!SB.configured) {
@@ -621,16 +656,23 @@ async function startLiveDriver() {
   }
 }
 async function joinLiveGame(code) {
-  if (!SB.configured) { S.error = 'Live games need Supabase — sign in first.'; render(); return false; }
+  // Signed-in coach joining by game code. ANY signed-in coach can
+  // drive — there is no Take over and no view-only for coaches
+  // (Robin's call, Nov 2026): whoever started the game, however many
+  // coach sessions are open, they all edit the same live game, last
+  // write wins with the version check in doLiveSync.
+  if (!SB.configured) { S.error = 'Live games need Supabase — try again later.'; render(); return false; }
+  if (!SB.authUser) { S.error = 'Sign in as a coach to join a live game with its game code.'; render(); return false; }
   try {
     const { data, error } = await SB.client.from('live_games').select('*').eq('game_code', code).maybeSingle();
     if (error) throw error;
     if (!data) { S.error = 'Live game ' + code + ' was not found — check the code.'; render(); return false; }
-    SB.liveId = data.id; SB.liveCode = code; SB.liveVersion = data.version; SB.role = 'viewer'; SB.offline = false;
+    SB.liveId = data.id; SB.liveCode = code; SB.liveVersion = data.version; SB.role = 'driver'; SB.offline = false;
+    SB.viewerMode = false;
     applyLiveState(data.state);
-    // The roster here came from the driver's live game, not from
-    // team_roster — do not auto-save it. (A viewer can't save anyway;
-    // after Take over, the explicit "Save roster" button still works.)
+    // The roster here came from the live game, not from team_roster
+    // — do not auto-save it. The explicit "Save roster" button still
+    // works if the coach wants to keep it.
     SB.rosterFromLive = true; SB.rosterFromBackend = false;
     if (data.phase === 'halftime') S.screen = 'halftime';
     else if (data.phase === 'finished') S.screen = 'finished';
@@ -644,6 +686,277 @@ async function joinLiveGame(code) {
     render();
     return false;
   }
+}
+/* ---------- Anonymous viewing via viewer_access (locked down) ---------- */
+/* A viewer code (from viewer_codes, generated by a coach in Settings)
+   is checked SERVER-SIDE by the SECURITY DEFINER function
+   viewer_access(code): it returns the running live games (if any) and
+   the history only on a match, otherwise {"ok": false}. Anon gets no
+   direct table reads at all. The link works any time — with no live
+   game running, the viewer still sees the history. An anonymous
+   watcher lands on the shared-view home, which lists the live games
+   with a Join button each, and can share the view onward (Share
+   copies the same link — viewers never generate or revoke codes).
+   Anon viewers poll the function (no Realtime for anon); a signed-in
+   coach who opens a viewer link drives like any coach (see below). */
+async function joinViewerCode(code) {
+  if (!SB.configured) { S.error = 'Viewing needs Supabase — try again later.'; render(); return false; }
+  code = (code || '').trim().toUpperCase();
+  if (!code) { S.error = 'Enter the 4-letter view code first.'; render(); return false; }
+  try {
+    const { data, error } = await SB.client.rpc('viewer_access', { p_code: code });
+    if (error) throw error;
+    if (!data || !data.ok) { S.error = 'That view code was not found — check the code.'; render(); return false; }
+    SB.viewerMode = true; SB.viewerJoinedCode = code;
+    applyViewerAccess(data);
+    return true;
+  } catch (e) {
+    S.error = 'Could not load the shared view.';
+    render();
+    return false;
+  }
+}
+function applyViewerAccess(data) {
+  // data: {ok, live: {...} | null, lives: [{id, game_code, version,
+  // phase, state}], history: [rows]} — lives is the whole list of
+  // running games; live is just the first, kept for compatibility.
+  const lives = Array.isArray(data.lives) ? data.lives : (data.live ? [data.live] : []);
+  SB.viewerLives = lives;
+  if (Array.isArray(data.history)) {
+    S.history = data.history.map(internalGameFromRow);
+    SB.historyLoaded = true; SB.historyError = '';
+    SB.viewerHistoryJson = JSON.stringify(data.history);
+  }
+  // A signed-in coach who opens a viewer link drives straight into
+  // the live game like any coach. An anonymous watcher lands on the
+  // shared-view home instead, which lists the live games with a Join
+  // button — same treatment as the coach's active-game note, but
+  // view-only. No live game yet: the home shows history only.
+  if (SB.authUser && lives.length) {
+    const live = lives[0];
+    SB.liveId = live.id; SB.liveCode = live.game_code; SB.liveVersion = live.version;
+    SB.role = 'driver';
+    applyLiveState(live.state);
+    SB.rosterFromLive = true; SB.rosterFromBackend = false;
+    if (live.phase === 'halftime') S.screen = 'halftime';
+    else S.screen = 'live';
+    S.liveTab = 'actions';
+    subscribeLive();
+  } else {
+    SB.liveId = null; SB.liveCode = null; SB.liveVersion = 0;
+    SB.role = SB.authUser ? 'driver' : 'viewer';
+    S.screen = 'viewer';
+  }
+  SB.offline = false;
+  startViewerPoll();
+  render();
+}
+// A code-joined viewer joins one of the listed live games, view-only.
+// The snapshot already came through viewer_access — no new server
+// read, and the code is not re-checked here: the list itself is the
+// proof the code was valid. Viewers never get edit controls.
+function joinViewerGame(id) {
+  const live = (SB.viewerLives || []).find(g => g && g.id === id);
+  if (!live) { S.error = 'That live game is no longer available.'; render(); return false; }
+  SB.liveId = live.id; SB.liveCode = live.game_code; SB.liveVersion = live.version;
+  SB.role = 'viewer';
+  applyLiveState(live.state);
+  SB.rosterFromLive = true; SB.rosterFromBackend = false;
+  if (live.phase === 'halftime') S.screen = 'halftime';
+  else S.screen = 'live';
+  S.liveTab = 'actions';
+  render();
+  return true;
+}
+function startViewerPoll() {
+  if (SB.viewerTimer) { clearInterval(SB.viewerTimer); SB.viewerTimer = null; }
+  // Anonymous watchers poll (no Realtime for anon). Signed-in
+  // coaches in viewer mode get Realtime via subscribeLive instead.
+  if (!SB.viewerMode || SB.authUser) return;
+  SB.viewerTimer = setInterval(() => { refreshViewer(); }, 3000);
+}
+async function refreshViewer() {
+  if (!SB.viewerMode || SB.authUser || !SB.client) return;
+  try {
+    const { data, error } = await SB.client.rpc('viewer_access', { p_code: SB.viewerJoinedCode });
+    if (error) throw error;
+    if (!data || !data.ok) {
+      // Code deactivated while watching — the link is dead.
+      const msg = 'This view link is no longer active.';
+      leaveLiveGame(); S.error = msg; render(); return;
+    }
+    const lives = Array.isArray(data.lives) ? data.lives : (data.live ? [data.live] : []);
+    SB.viewerLives = lives;
+    const histJson = JSON.stringify(data.history || []);
+    if (histJson !== SB.viewerHistoryJson) {
+      S.history = (data.history || []).map(internalGameFromRow);
+      SB.historyLoaded = true; SB.viewerHistoryJson = histJson;
+    }
+    if (SB.liveId) {
+      // Watching a game: follow it, or fall back to the home screen
+      // when it ended. The home list updates from SB.viewerLives.
+      const mine = lives.find(g => g && g.id === SB.liveId);
+      if (!mine) {
+        SB.liveId = null; SB.liveCode = null; SB.liveVersion = 0; SB.role = 'viewer';
+        S.screen = 'viewer'; render();
+      } else if (mine.version > SB.liveVersion) {
+        // A newer live version applies immediately, with the
+        // "Updated" note — same as any live update.
+        handleRemoteLive({ id: mine.id, game_code: mine.game_code, version: mine.version, phase: mine.phase, state: mine.state, last_writer_id: null });
+      } else {
+        render(); // history may have changed above
+      }
+    } else {
+      // On the shared-view home: a started game appears in the list
+      // with a Join button — the viewer taps it, no auto-jump.
+      render();
+    }
+  } catch (e) { /* poll failure is silent — the next poll retries */ }
+}
+/* Viewer home screen: the live games (if any) with a Join button
+   each, then history. A started game appears here on the next poll —
+   the viewer taps Join, it never auto-jumps. A viewer can also pass
+   the view on: Share copies the same viewer link they arrived on
+   (same code, no new code — only a coach can generate or revoke). */
+function viewerHtml(){
+  const lives = SB.viewerLives || [];
+  const gamesHtml = lives.length
+    ? lives.map(g => {
+        const st = (g.state) || {};
+        const score = 'US ' + (st.ourScore || 0) + ' \u2013 ' + (st.theirScore || 0) + ' THEM';
+        return '<div class="card"><div class="row spread"><span><strong>There\u2019s a live game in progress</strong>'
+          + ' <span class="muted">' + esc(score) + ' &middot; ' + fmtClock(activeGameElapsed(st)) + '</span></span>'
+          + '<button class="primary" data-join-viewer-game="' + esc(g.id) + '">Join</button></div></div>';
+      }).join('')
+    : '<p class="muted">No live game right now — past games below. When the coach starts a game, it appears here live.</p>';
+  return '<section aria-label="Shared view"><h2>Shared view</h2>'
+    + gamesHtml
+    + '<div class="row"><button data-share-viewer>Share this view</button><button data-leave-live>Leave shared view</button></div>'
+    + '<h3>History</h3>' + historyHtml() + '</section>';
+}
+/* ---------- Share a view link (coach, Settings tab) ---------- */
+/* One active viewer code at a time. Generating a new link deactivates
+   the old one first, so a shared link can be killed by generating a
+   new one. The link is ?view=CODE on this app's own URL, and the
+   plain code is shown alongside it for reading out loud. */
+function viewerLinkUrl(code){
+  try { return new URL('?view=' + code, document.baseURI).href; }
+  catch (e) { return '?view=' + code; }
+}
+function viewerShareHtml(){
+  if (!SB.authUser) return '';
+  // Load the current code once, when Settings first renders.
+  if (!SB.viewerCodeLoaded && !SB.viewerCodeLoading) loadViewerCode();
+  const code = SB.viewerCode;
+  return '<div class="card"><h3>Share a view link</h3>'
+    +'<p class="muted">Anyone with the link can watch live and see history — no account, no sign-in. Generating a new link turns off the old one.</p>'
+    +(code
+      ? '<p>Current code: <strong>' + esc(code) + '</strong></p><p class="muted small">' + esc(viewerLinkUrl(code)) + '</p><div class="row"><button data-copy-viewer-link>Copy viewer link</button><button data-gen-viewer-link>Generate new link</button></div>'
+      : '<p class="muted">' + (SB.viewerCodeLoaded ? 'No view link yet.' : 'Loading…') + '</p><div class="row"><button data-gen-viewer-link>Generate view link</button></div>')
+    +'</div>';
+}
+async function loadViewerCode(){
+  if (!SB.configured || !SB.authUser) return;
+  SB.viewerCodeLoading = true;
+  try {
+    const { data, error } = await SB.client.from('viewer_codes').select('code').eq('active', true).maybeSingle();
+    if (error) throw error;
+    if (data && data.code) SB.viewerCode = data.code;
+    SB.viewerCodeLoaded = true;
+  } catch (e) { SB.viewerCodeLoaded = true; }
+  SB.viewerCodeLoading = false;
+  render();
+}
+async function generateViewerCode(){
+  if (!SB.configured || !SB.authUser) return;
+  try {
+    // Deactivate the old code first (one active code at a time),
+    // then insert the new one. A unique-code clash retries with a
+    // fresh code.
+    await SB.client.from('viewer_codes').update({ active: false, updated_at: new Date().toISOString() }).eq('active', true);
+    let code = '';
+    for (let attempt = 0; attempt < 5 && !code; attempt++) {
+      const candidate = genGameCode();
+      const { error } = await SB.client.from('viewer_codes').insert({ code: candidate, active: true });
+      if (!error) code = candidate;
+    }
+    if (!code) throw new Error('no code generated');
+    SB.viewerCode = code; SB.viewerCodeLoaded = true;
+    await copyText(viewerLinkUrl(code));
+    showToast('Link copied');
+    render();
+  } catch (e) { S.error = 'Could not generate a view link — try again.'; render(); }
+}
+async function copyText(text){
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) { await navigator.clipboard.writeText(text); return true; }
+  } catch (e) { /* fall through to the textarea fallback */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly', '');
+    ta.style.position = 'absolute'; ta.style.left = '-9999px';
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    return !!ok;
+  } catch (e) { return false; }
+}
+/* ---------- Active live game note (signed-in coaches) ---------- */
+/* A coach opening the app should not need a code to rejoin their own
+   team's game: after sign-in, the setup screen checks once for live
+   games (phase live/halftime) and shows a small one-line note per
+   game with a Join button — no code, full edit rights (any coach can
+   drive). The check is coaches-only and non-blocking: the setup flow
+   renders first, and the note appears only when a game is actually
+   active. The game the coach is already in never shows a note. */
+async function loadActiveGames(){
+  if (!SB.configured || !SB.authUser || SB.activeGamesLoading) return;
+  SB.activeGamesLoading = true;
+  try {
+    const { data, error } = await SB.client.from('live_games')
+      .select('*').in('phase', ['live', 'halftime'])
+      .order('updated_at', { ascending: false });
+    if (error) throw error;
+    SB.activeGames = data || [];
+    SB.activeGamesLoaded = true;
+  } catch (e) { SB.activeGamesLoaded = true; /* note just stays hidden */ }
+  SB.activeGamesLoading = false;
+  render();
+}
+function activeGameElapsed(st){
+  const clock = (st && st.clock) || {};
+  if (clock.running && clock.anchor_started_at) {
+    return (clock.elapsed_seconds_at_anchor || 0) + (Date.now() - clock.anchor_started_at) / 1000;
+  }
+  return clock.elapsed_seconds_at_anchor != null ? clock.elapsed_seconds_at_anchor : (st.elapsed || 0);
+}
+function activeGamesHtml(){
+  if (!SB.authUser || SB.liveId) return '';
+  // Load once, when the setup screen first renders.
+  if (!SB.activeGamesLoaded && !SB.activeGamesLoading) loadActiveGames();
+  const games = (SB.activeGames || []).filter(g => g && g.id !== SB.liveId);
+  if (!games.length) return '';
+  return games.map(g => {
+    const st = (g.state) || {};
+    const score = 'US ' + (st.ourScore || 0) + ' – ' + (st.theirScore || 0) + ' THEM';
+    return '<div class="card"><div class="row spread"><span><strong>There\u2019s a live game in progress</strong>'
+      + ' <span class="muted">' + esc(score) + ' &middot; ' + fmtClock(activeGameElapsed(st)) + '</span></span>'
+      + '<button class="primary" data-join-active="' + esc(g.id) + '">Join</button></div></div>';
+  }).join('');
+}
+async function joinActiveGame(row){
+  // No code needed: the coach is signed in, so any coach can drive.
+  if (!SB.configured || !SB.authUser || !row) return false;
+  SB.liveId = row.id; SB.liveCode = row.game_code; SB.liveVersion = row.version;
+  SB.role = 'driver'; SB.offline = false; SB.viewerMode = false;
+  applyLiveState(row.state || {});
+  SB.rosterFromLive = true; SB.rosterFromBackend = false;
+  if (row.phase === 'halftime') S.screen = 'halftime';
+  else S.screen = 'live';
+  S.liveTab = 'actions';
+  subscribeLive();
+  render();
+  return true;
 }
 function scheduleLiveSync(immediate) {
   if (SB.role !== 'driver' || !SB.liveId || !SB.configured) return;
@@ -661,34 +974,30 @@ async function doLiveSync() {
     }).eq('id', SB.liveId).eq('version', SB.liveVersion).select('version');
     if (error) throw error;
     if (!data || !data.length) {
-      // Version moved under us — fetch the latest and offer the choice.
+      // Version moved under us: another coach (or Robin's other
+      // session) wrote first. Retry once against the fresh version —
+      // last write wins, no banner, no user action — so this
+      // session's change still lands instead of being dropped.
       const latest = await fetchLiveRow();
-      if (latest && latest.version > SB.liveVersion) { SB.conflict = { row: latest }; render(); }
+      if (!latest) { SB.offline = true; render(); return; }
+      if (latest.version > SB.liveVersion) {
+        const retry = await SB.client.from('live_games').update({
+          state: buildLiveState(), phase: livePhase(), version: latest.version + 1,
+          last_writer_id: WRITER_ID, last_writer_label: 'Driver',
+          updated_at: new Date().toISOString(),
+        }).eq('id', SB.liveId).eq('version', latest.version).select('version');
+        if (!retry.error && retry.data && retry.data.length) {
+          SB.liveVersion = latest.version + 1; SB.offline = false; return;
+        }
+        // The retry raced too — take the latest state live, like any
+        // other live update, and let the next action write on top.
+        handleRemoteLive(latest);
+      }
       return;
     }
     SB.liveVersion = nextVersion; SB.offline = false;
   } catch (e) {
     SB.offline = true;
-    render();
-  }
-}
-async function takeOverLive() {
-  if (!SB.configured || !SB.liveId) return;
-  try {
-    const latest = await fetchLiveRow();
-    if (!latest) { S.error = 'Could not take over — live game no longer found.'; render(); return; }
-    const nextVersion = latest.version + 1;
-    const { data, error } = await SB.client.from('live_games').update({
-      state: buildLiveState(), phase: livePhase(), version: nextVersion,
-      last_writer_id: WRITER_ID, last_writer_label: 'Driver',
-      updated_at: new Date().toISOString(),
-    }).eq('id', SB.liveId).eq('version', latest.version).select('version');
-    if (error) throw error;
-    if (!data || !data.length) { S.error = 'Takeover raced another change — try again.'; render(); return; }
-    SB.liveVersion = nextVersion; SB.role = 'driver'; SB.offline = false;
-    render();
-  } catch (e) {
-    S.error = 'Takeover failed — try again.';
     render();
   }
 }
@@ -704,11 +1013,39 @@ async function finishLiveGame() {
     SB.liveVersion = nextVersion;
   } catch (e) { /* History insert is the durable record; live row may stay 'live'. */ }
   unsubscribeLive();
-  SB.liveId = null; SB.liveCode = null; SB.role = null; SB.conflict = null;
+  SB.liveId = null; SB.liveCode = null; SB.role = null;
+}
+/* Live-update toast: a small "Updated" pill fixed near the top of the
+   screen. It lives on document.body (outside mainEl, so re-renders
+   never touch it) and is position:fixed — it never takes space in the
+   page flow and never pushes the field, bench, or Apply button down.
+   It fades away on its own after a few seconds. Shown on remote
+   updates only, never on the driver's own actions, and worded
+   neutrally ("Updated") — Robin signed in on two devices is the same
+   person, not "the other coach". */
+let toastTimer = null;
+function showToast(text){
+  try {
+    let el = document.getElementById('live-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'live-toast';
+      el.className = 'live-toast';
+      el.setAttribute('aria-live', 'polite');
+      document.body.appendChild(el);
+    }
+    el.textContent = text;
+    el.classList.add('show');
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => { el.classList.remove('show'); }, 2500);
+  } catch (e) { /* toast is cosmetic — never break the game for it */ }
 }
 function resetLiveSession() {
   unsubscribeLive();
-  SB.liveId = null; SB.liveCode = null; SB.liveVersion = 0; SB.role = null; SB.conflict = null; SB.viewerAnchor = null;
+  if (SB.viewerTimer) { clearInterval(SB.viewerTimer); SB.viewerTimer = null; }
+  SB.liveId = null; SB.liveCode = null; SB.liveVersion = 0; SB.role = null; SB.viewerAnchor = null;
+  SB.viewerMode = false; SB.viewerHistoryJson = ''; SB.viewerJoinedCode = ''; SB.viewerLives = [];
+  SB.activeGames = []; SB.activeGamesLoaded = false; SB.activeGamesLoading = false;
 }
 
 /* ---------- Undo ---------- */
@@ -827,8 +1164,29 @@ function autoLineup(favourLow){
 }
 function applyLineup(lineup){
   pushUndo('lineup change');
-  S.lineup=[...lineup];
+  S.lineup=dedupeLineup([...lineup]);
   S.removedPositions=[]; S.shortMode=false;
+}
+/* One player, one field spot (Robin's rule, Nov 2026): placing a
+   player at a second spot clears the first one — a move, not a copy.
+   The spot they leave becomes empty (just the position label).
+   Preferred positions are different — a player can prefer many
+   positions — and the swap flow (two players trading spots) is
+   unaffected: it swaps, never duplicates. */
+function placeOnField(lineup, pos, player){
+  if (player == null) { lineup[pos] = null; return; }
+  for (let k = 0; k < lineup.length; k++) if (k !== pos && lineup[k] === player) lineup[k] = null;
+  lineup[pos] = player;
+}
+/* Defensive pass for lineups loaded from storage (last / preferred /
+   halftime plan): keep the first occurrence of each player, clear
+   any later duplicates. */
+function dedupeLineup(lineup){
+  const seen = new Set();
+  return (lineup || []).map(x => {
+    if (x == null || seen.has(x)) return null;
+    seen.add(x); return x;
+  });
 }
 
 /* ---------- Rendering ---------- */
@@ -864,9 +1222,14 @@ function startClock(){
 function fieldSpotHtml(pos, opts){
   const p=S.lineup[pos];
   const removed=S.removedPositions.includes(pos);
-  const queuedOff=S.queue.find(q=>q.pos===pos);
-  const staged=S.swapPair.includes(pos);
-  const sel=S.selection && S.selection.kind==='out' && S.selection.pos===pos;
+  // Queue / selection decorations are live-Actions only (opts.live):
+  // every other field (setup, review, halftime plan, finished, and the
+  // read-only starting lineup) shows plain chips, so a queued sub can
+  // never leak into the starting lineup view.
+  const live=!!opts.live;
+  const queuedOff=live?S.queue.find(q=>q.pos===pos):undefined;
+  const staged=live&&S.swapPair.includes(pos);
+  const sel=live&&S.selection&&S.selection.kind==='out'&&S.selection.pos===pos;
   let cls='chip', badge='';
   if(removed){ cls+=' removed'; }
   else if(p==null){ cls+=' empty'; }
@@ -882,8 +1245,11 @@ function fieldSpotHtml(pos, opts){
   // (private app); setup / review / finished chips show just the name.
   // A queued-in player is shown inside the chip ("-> name"), with the
   // position badge on the chip's top edge — never as a line under it.
-  const mins=(opts.showMinutes && p!=null && !removed)?'<span class="mins">'+Math.round(totalSec(p)/60)+'m</span>':'';
-  const pairIn=queuedOff?'<span class="pair">\u2192 '+esc(S.roster[queuedOff.in].name)+'</span>':'';
+  // Minutes and incoming lines are always rendered (empty when
+  // absent) so a chip is exactly the same height whether or not a sub
+  // is incoming — the chip never grows and the page never shifts.
+  const mins='<span class="mins">'+((opts.showMinutes&&p!=null&&!removed)?Math.round(totalSec(p)/60)+'m':'')+'</span>';
+  const pairIn='<span class="pair">'+(queuedOff?'\u2192 '+esc(S.roster[queuedOff.in].name):'')+'</span>';
   const chipInner='<span>'+name+'</span>'+mins+pairIn;
   const inner=opts.readonly
     ? '<div class="'+cls+'">'+chipInner+'</div>'
@@ -896,11 +1262,18 @@ function fieldHtml(opts){
   const row=(positions)=>'<div class="f-row'+(positions.length===3?' mid':'')+'">'+positions.map(p=>fieldSpotHtml(p,opts)).join('')+'</div>';
   // Our half only: ST top, midfield, defence, GK in the box at the
   // bottom. Only the outer border and the GK box are drawn.
+  // Swap overlay (live Actions only, opts.swapOverlay): when a swap is
+  // staged, Swap / Cancel sit inside the field's bottom-right corner
+  // as an absolute overlay — zero vertical space on the page, nothing
+  // shifts when they appear. The GK chip is centred, so the corner of
+  // the goal box is empty.
+  const swapOverlay=opts.swapOverlay?'<div class="field-swap"><button class="primary" data-do-swap>Swap</button><button class="ghost" data-cancel-swap>Cancel swap</button></div>':'';
   return '<div class="field" role="group" aria-label="Field, 1-2-3-1">'
     + row([6])
     + row([3,4,5])
     + row([1,2])
     + '<div class="gk-box">'+row([0])+'</div>'
+    + swapOverlay
     + '</div>';
 }
 function benchHtml(){
@@ -917,7 +1290,10 @@ function benchHtml(){
     const top=q
       ? '<span class="b-name">'+name+'</span><span class="b-badge">\u2191 '+POSITIONS[q.pos]+'</span>'
       : '<span class="b-name">'+name+'</span><span class="b-mins">'+Math.round(totalSec(i)/60)+'m</span>';
-    const sub=q?'<span class="b-sub">for '+esc(S.roster[q.out].name)+'</span>':'';
+    // The "for <out>" line is always rendered (empty when no sub is
+    // incoming) so a bench button is exactly the same height whether
+    // or not it has a queued sub — the button never grows.
+    const sub='<span class="b-sub">'+(q?'for '+esc(S.roster[q.out].name):'')+'</span>';
     return '<button class="'+cls+'" data-bench="'+i+'">'+top+sub+'</button>';
   }).join('')+'</div>';
 }
@@ -938,21 +1314,36 @@ function minutesRowsHtml(){
 function teamRowsHtml(){
   // Compact Roster tab: one short row per player, ~86px tall.
   // Line 1 (no wrap, always fits): availability circle, name + status
-  // ("Bench · 0m · 5 pos" — where/minutes/position count condensed
-  // into one muted run; "Absent · N pos" when absent), Rename + More
-  // as small buttons. Line 2: all 7 position chips in a single row,
-  // green check on preferred positions; tap a chip to toggle it (at
-  // least one preferred position is always kept). A note, if any, is
-  // its own small line. Nothing is dropped to save space.
+  // ("Bench · 0m · 5 pos" on setup — where/minutes/position count
+  // condensed into one muted run; "Absent · N pos" when absent),
+  // More as a small button (plus Rename on the setup Roster tab only
+  // — never during a game). Line 2 (setup only): all 7 position
+  // chips in a single row, green fill on preferred positions; tap a
+  // chip to toggle it (at least one preferred position is always
+  // kept). Selected chips show just the position label on green — no
+  // checkmark: the green fill already says selected. A note, if any,
+  // is its own small line. Nothing is dropped to save space.
+  // During a game (live Team tab, or the setup screen used as the
+  // mid-game Edit lineup editor) there are no preferred-positions
+  // controls at all: no chips row, no "N pos" in the status — just
+  // name, status, minutes, and mark tired / leaving / note (More).
+  // Preferred positions are edited on the setup Roster tab only.
   const idx=S.roster.map((r,i)=>i).sort((a,b)=>S.roster[a].name.localeCompare(S.roster[b].name));
   const inGame = (S.screen === 'live' || S.screen === 'halftime');
+  // Rename and preferred positions belong to setup only: during a
+  // game there is no Rename button and no prefs chips — the row
+  // simply has More. Both stay available on the setup Roster tab
+  // before a game starts.
+  const showSetupOnly = (S.screen === 'setup' && !S.editingLive);
+  const showRename = showSetupOnly;
+  const showPrefs = showSetupOnly;
   return idx.map(i=>{
     const r=S.roster[i], pos=S.lineup.indexOf(i), g=goalsFor(i);
     const where=pos>=0?POSITIONS[pos]:'Bench';
     const status = r.present
-      ? where+' &middot; '+fmtMin(totalSec(i))+' min &middot; '+r.prefs.length+' pos'
-      : 'Absent &middot; '+r.prefs.length+' pos';
-    const chips=POSITIONS.map(pp=>'<button data-pref-inline="'+pp+'" data-player="'+i+'" aria-pressed="'+r.prefs.includes(pp)+'">'+(r.prefs.includes(pp)?'\u2713 ':'')+pp+'</button>').join('');
+      ? where+' &middot; '+fmtMin(totalSec(i))+' min'+(showPrefs?' &middot; '+r.prefs.length+' pos':'')
+      : 'Absent'+(showPrefs?' &middot; '+r.prefs.length+' pos':'');
+    const chips=showPrefs?POSITIONS.map(pp=>'<button data-pref-inline="'+pp+'" data-player="'+i+'" aria-pressed="'+r.prefs.includes(pp)+'">'+pp+'</button>').join(''):'';
     // Mid-game arrivals and departures (private Team tab): a departing
     // player keeps their minutes and their spot can be filled from the
     // bench; a late arrival joins the bench. Sits at the end of the
@@ -962,20 +1353,17 @@ function teamRowsHtml(){
           ? '<button class="xs" data-leaving="'+i+'">Leaving</button>'
           : '<button class="xs" data-arrived="'+i+'">Arrived</button>')
       : '';
+    // The second row exists only when it has something in it: chips
+    // on setup, Leaving/Arrived during a game — never an empty row
+    // (no gap left behind when the chips go away).
+    const secondRow = (chips || arriveLeave) ? '<div class="pos-chips">'+chips+arriveLeave+'</div>' : '';
     return '<div class="card roster-row"><div class="roster-top"><button class="avail'+(r.present?'':' absent')+'" data-attend="'+i+'" aria-label="Toggle availability for '+esc(r.name)+'">'+(r.present?'\u2713':'')+'</button>'
       +'<div class="roster-id"><span class="name">'+esc(r.name)+'</span>'
       +(g?' <span>\u26bd '+g+'</span>':'')+' <span class="muted small">'+status+'</span></div>'
-      +'<button class="xs" data-rename="'+i+'">Rename</button><button class="xs" data-more="'+i+'">More</button></div>'
+      +(showRename?'<button class="xs" data-rename="'+i+'">Rename</button>':'')
+      +'<button class="xs" data-more="'+i+'">More</button></div>'
       +(r.note?'<div class="note-line">'+esc(r.note)+'</div>':'')
-      +'<div class="pos-chips">'+chips+arriveLeave+'</div></div>';
-  }).join('');
-}
-function positionsRowsHtml(){
-  // Live Positions tab: name + preferred positions, chips tappable.
-  return S.roster.map((r,i)=>i).sort((a,b)=>S.roster[a].name.localeCompare(S.roster[b].name)).map(i=>{
-    const r=S.roster[i];
-    const chips=POSITIONS.map(pp=>'<button data-pref-inline="'+pp+'" data-player="'+i+'" aria-pressed="'+r.prefs.includes(pp)+'">'+(r.prefs.includes(pp)?'\u2713 ':'')+pp+'</button>').join('');
-    return '<div class="card"><div class="row spread"><span class="name">'+esc(r.name)+'</span><span class="muted">'+r.prefs.join(' &middot; ')+'</span></div><div class="pos-chips">'+chips+'</div></div>';
+      +secondRow+'</div>';
   }).join('');
 }
 function seasonTotalsHtml(){
@@ -1009,9 +1397,12 @@ function seasonTotalsHtml(){
         + '<div><strong>' + t.games + '</strong> <span class="muted">game' + (t.games === 1 ? '' : 's') + '</span></div>'
         + (posLine ? '<div class="muted season-pos">' + posLine + '</div>' : '') + '</div>';
     }).join('');
+  // Anonymous code-joined watchers see the totals but get no CSV
+  // downloads of history (same rule as the viewer edit gate).
+  const anonViewer = SB.viewerMode && !SB.authUser;
   return '<div class="row spread" style="align-items:baseline"><h2 style="margin-bottom:2px">Season totals</h2>'
-    + '<span><button class="season-csv-link" data-season-csv>&darr; Full season CSV</button>'
-    + '<button class="season-csv-link" data-all-history-csv>&darr; Export all history</button></span></div>'
+    + (anonViewer ? '' : '<span><button class="season-csv-link" data-season-csv>&darr; Full season CSV</button>'
+    + '<button class="season-csv-link" data-all-history-csv>&darr; Export all history</button></span>') + '</div>'
     + '<p class="muted" style="margin-top:0">' + S.history.length + ' game' + (S.history.length === 1 ? '' : 's')
     + ' &middot; ' + (S.settings.countGoalieTime ? 'goalie time counts toward totals' : 'totals exclude goalie time (shown in the breakdown)') + '</p>'
     + rows;
@@ -1042,7 +1433,9 @@ function historyHtml(){
     else if (!SB.historyLoaded) status = '<p class="muted">Loading history\u2026</p>';
   }
   if(!S.history.length) return status + '<p class="muted">No finished games yet.</p>';
-  return status + seasonTotalsHtml() + '<h2>Past games</h2>' + S.history.map((h,hi)=>{
+  // Order (Robin's call, Nov 2026): games first, then the season
+  // totals cards. No content changes to either section.
+  return status + '<h2>Past games</h2>' + S.history.map((h,hi)=>{
     const open = !!S.expandedHistory[hi];
     const played = h.playedSeconds ? fmtClock(h.playedSeconds) + ' played' : '';
     const head = '<div class="row spread"><div><strong>' + esc(h.date) + '</strong>'
@@ -1062,12 +1455,14 @@ function historyHtml(){
         + (posLine ? '<div class="note-line">' + posLine + '</div>' : '') + '</div>'
         + '<div class="nums">' + Math.round((p.seconds || 0) / 60) + ' min</div></div>';
     }).join('');
+    // Anonymous watchers get no per-game export or goal editing.
+    const anonViewer = SB.viewerMode && !SB.authUser;
     return '<div class="card">' + head
-      + '<div class="row" style="margin:8px 0"><button class="small" data-csv="' + hi + '">Export this game CSV</button> '
-      + '<button class="small" data-editgoals="' + hi + '">Edit goals</button></div>'
+      + (anonViewer ? '' : '<div class="row" style="margin:8px 0"><button class="small" data-csv="' + hi + '">Export this game CSV</button> '
+      + '<button class="small" data-editgoals="' + hi + '">Edit goals</button></div>')
       + '<h3>Goals</h3><p>' + esc(goalLines) + '</p>'
       + rows + '</div>';
-  }).join('');
+  }).join('') + seasonTotalsHtml();
 }
 function csvCell(v){ return '"'+String(v).replace(/"/g,'""')+'"'; }
 // ISO date for a history game: stored on the game since the rebuild
@@ -1202,11 +1597,15 @@ function openNoteEditor(i){
 }
 function openMoreModal(i){
   const r=S.roster[i];
+  // During a game the More sheet is just mark tired, leaving, note —
+  // no position-preferences editing (that lives on the setup Roster
+  // tab only), and no Rename either (same rule as the row button).
+  const setupOnly = (S.screen === 'setup' && !S.editingLive);
   openModal('<h2>'+esc(r.name)+'</h2>'
     +'<div class="pin-bottom">'
     +'<button data-note="'+i+'">'+(r.note?'Edit note':'Add note')+'</button>'
     +'<button data-tired="'+i+'">'+(r.tired?'Untire':'Mark tired')+'</button>'
-    +'<button data-prefs="'+i+'">Position preferences</button>'
+    +(setupOnly?'<button data-prefs="'+i+'">Position preferences</button>':'')
     +'<button class="danger" data-remove-player="'+i+'">Remove player</button>'
     +'<button class="ghost" data-close>Close</button></div>');
 }
@@ -1256,11 +1655,6 @@ function removePlayer(i){
   closeModal(); render();
   saveRosterAuto();
 }
-function openStartingLineup(){
-  const line=S.startingLineup||S.lineup;
-  const keep=S.lineup; S.lineup=[...line]; const field=fieldHtml({readonly:true}); S.lineup=keep;
-  openModal('<h2>Starting lineup</h2>'+field+'<div class="pin-bottom"><button class="ghost" data-close>Close</button></div>');
-}
 function openShortChooser(){
   const opts=POSITIONS.map((p,i)=>S.removedPositions.includes(i)?'':'<button data-remove-pos="'+i+'">Remove '+p+'</button>').join('');
   openModal('<h2>Play short (6v7)</h2><p class="muted">Choose one field slot to remove. Minutes are preserved; the player comes off to the bench.</p>'
@@ -1282,9 +1676,17 @@ function openEditGoalsLive(){
 /* ---------- Screens ---------- */
 function render(){
   // Login gate: when Supabase is configured and nobody is signed in,
-  // show ONLY the login screen — no match UI, no history, no live game
-  // behind it, and no clock running.
-  if (authGated()) { mainEl.innerHTML = loginHtml(); return; }
+  // show the entry screen (join a live game without signing in, or
+  // sign in as a coach) — no match UI, no history, no roster behind
+  // it, and no clock running. The one exception: a watcher who has
+  // already joined a live game with its code keeps watching it
+  // view-only, even without a sign-in. A watcher who taps "Sign in"
+  // (S.showSignin) sees the sign-in form instead, and returns to the
+  // live game after signing in.
+  if (authGated()) {
+    if (SB.viewerMode && !S.showSignin) { /* fall through: watch the shared view */ }
+    else { mainEl.innerHTML = S.showSignin ? loginHtml() : entryHtml(); return; }
+  }
   startClock();
   // Errors are the only top-of-screen message left: they report a
   // blocked action or a failed load, which nothing else on screen
@@ -1295,17 +1697,25 @@ function render(){
   const err=S.error?'<div class="error" role="alert">'+esc(S.error)+'</div>':'';
   S.error='';
   let html=err;
-  // Supabase status banners (never block the game).
+  // Supabase status banners (never block the game). Live updates
+  // never use a banner: they apply immediately and show the small
+  // "Updated" toast instead (see showToast) — a banner here pushed
+  // the whole live screen down every time.
   if(SB.backendError) html+='<div class="error" role="alert">'+esc(SB.backendError)+'</div>';
   if(SB.offline) html+='<div class="error" role="alert">Offline — changes will sync when signal returns.</div>';
-  if(SB.conflict) html+='<div class="banner">Updated by the other coach — the live game changed on another phone.'
-    +'<div class="row" style="margin-top:8px"><button data-conflict-reload>Reload their version</button><button data-conflict-keep>Keep mine</button></div></div>';
-  if(SB.role==='viewer' && SB.liveId) html+='<div class="banner">View-only — you are watching the driver’s game live (code '+esc(SB.liveCode)+').'
-    +'<div class="row" style="margin-top:8px"><button data-takeover-live>Take over as driver</button></div></div>';
+  // Anonymous watchers are strictly view-only: a banner with the way
+  // in (sign in as a coach to make changes). Signed-in coaches never
+  // see this banner — any coach can drive, no Take over.
+  if(SB.viewerMode && !SB.authUser) html+='<div class="banner">View-only — you are watching the shared view.'
+    +'<div class="row" style="margin-top:8px"><button data-share-viewer>Share this view</button><button data-goto-signin>Sign in as a coach to make changes</button></div></div>';
   // Driver: sync the live snapshot (debounced) after any render that
-  // follows an action. Remote applies set SB.applyingRemote and skip.
-  if(SB.role==='driver' && SB.liveId && !SB.applyingRemote && !SB.conflict && !SB.offline && (S.screen==='live' || S.screen==='halftime')) scheduleLiveSync(false);
-  if(S.screen==='setup') html+=setupHtml();
+  // follows an action. Remote applies set SB.applyingRemote and skip;
+  // a render right after applying a remote update skips the sync once
+  // (SB.suppressSyncOnce) so the applied state is never written back.
+  if (SB.suppressSyncOnce) SB.suppressSyncOnce = false;
+  else if (SB.role==='driver' && SB.liveId && !SB.applyingRemote && !SB.offline && (S.screen==='live' || S.screen==='halftime')) scheduleLiveSync(false);
+  if(S.screen==='viewer') html+=viewerHtml();
+  else if(S.screen==='setup') html+=setupHtml();
   else if(S.screen==='review') html+=reviewHtml();
   else if(S.screen==='live') html+=liveHtml();
   else if(S.screen==='halftime') html+=halftimeHtml();
@@ -1367,11 +1777,18 @@ function setupHtml(){
       +'<p><label><input type="checkbox" data-setting-check="countGoalieTime" '+(S.settings.countGoalieTime?'checked':'')+'> Count goalie time toward total game time</label><br><span class="muted">Off by default: totals count only non-goalie minutes. Goalie minutes are still tracked and shown.</span></p>'
       +'<p><label>Team name <input type="text" data-setting-text="teamName" value="'+esc(S.teamName)+'"></label></p>'
       +(SB.authUser?'<p class="muted">Signed in as '+esc(SB.authUser.email||'coach')+'</p><div class="row"><button class="ghost" data-signout>Sign out</button></div>':'')
-      +'</div>';
+      +'</div>'
+      +viewerShareHtml();
   } else {
     body=historyHtml();
   }
+  // The active-game note sits above the tabs, one line per live game
+  // with a Join button — compact, and only there when a game is
+  // actually running. It never appears mid-game (Edit lineup) or
+  // for the game the coach is already in.
+  const activeNote = (!S.editingLive) ? activeGamesHtml() : '';
   return '<section aria-label="Setup">'
+    +activeNote
     +'<div class="team-head"><h2>\uD83D\uDD25\u26BD '+esc(S.teamName)+'</h2></div>'
     +'<div class="tabs" role="tablist">'+tabs.map(([k,label])=>'<button role="tab" aria-selected="'+(S.setupTab===k)+'" data-setup-tab="'+k+'">'+label+'</button>').join('')+'</div>'
     +body
@@ -1384,32 +1801,42 @@ function reviewHtml(){
     +'<div class="row"><button class="primary grow" data-start-game>Start game</button><button data-back-setup>Back to setup</button></div></section>';
 }
 function liveHtml(){
-  const tabs=[['actions','Actions'],['minutes','Minutes'],['team','Team'],['positions','Positions']];
+  // Viewers (signed-in coaches and anonymous code-joined watchers
+  // alike) get a History tab on the live screen: it is the only way
+  // an anonymous watcher can see history, since they have no setup
+  // screen. It is read-only — the viewer edit gate blocks every
+  // export / edit-goals button inside it, and anonymous watchers
+  // additionally cannot download CSVs.
+  const tabs=[['actions','Actions'],['minutes','Minutes'],['team','Team']];
+  if (SB.role === 'viewer' && SB.liveId) tabs.push(['history','History']);
   let body='';
-  if(S.liveTab==='actions'){
+  if(S.liveTab==='history'){
+    body='<h2>History</h2>'+historyHtml();
+  } else if(S.liveTab==='actions'){
     // Layout stability: the scoreboard, tabs, field, bench and Apply
-    // never move as actions are taken. The Swap/Cancel buttons live in
-    // a fixed-height slot under the field (empty when no swap is
-    // staged), and the Apply button lives in a fixed-height slot under
-    // the bench (empty when nothing is queued) — so staging or
-    // executing a swap or a sub cannot push the bench or anything else
-    // down. No banner or hint is ever inserted between the field and
-    // the bench: the selected chips already show a staged swap, and
-    // the queue list below Apply already shows a queued sub.
-    body='<div class="field-wrap">'+fieldHtml({showMinutes:true})+'</div>'
-      +'<div class="swap-slot">'
-      +(S.swapPair.length?'<div class="row"><button class="primary" data-do-swap>Swap</button><button class="ghost" data-cancel-swap>Cancel swap</button></div>':'')
-      +'</div>'
-      +'<div class="bench-head"><h3>Bench</h3><span class="muted small">'+(S.queue.length?S.queue.length+' queued &middot; tap field or bench to add another':'tap a player to start a sub')+'</span></div>'+benchHtml()
+    // never move as actions are taken. Field chips and bench buttons
+    // have fixed heights with their incoming-player lines always
+    // rendered (empty when absent), so queueing a sub cannot grow
+    // them. The Swap/Cancel buttons live inside the field as an
+    // absolute overlay in its bottom-right corner — zero vertical
+    // space. The Apply button lives in a fixed-height slot under the
+    // bench (empty when nothing is queued). No banner or hint is ever
+    // inserted between the field and the bench: the selected chips
+    // already show a staged swap, and the queue list below Apply
+    // already shows a queued sub.
+    body='<div class="field-wrap">'+fieldHtml({showMinutes:true, live:true, swapOverlay:S.swapPair.length===2&&!S.queue.length})+'</div>'
+      +'<div class="bench-head"><h3>Bench</h3><span class="muted small">'+(S.selection&&S.selection.kind==='in'?esc(S.roster[S.selection.player].name)+' selected &middot; tap a field player to sub them on':(S.queue.length?S.queue.length+' queued &middot; tap field or bench to add another':'tap a player to start a sub'))+'</span></div>'+benchHtml()
       +'<div class="apply-slot">'
       +(S.queue.length?'<button class="apply" data-apply>Apply '+S.queue.length+' now</button>':'')
       +'</div>'
+      +'<div class="queue-area">'
       +(S.queue.length
         ? '<h3>Next change</h3><p class="muted">'+S.queue.length+' ready &middot; <button class="small ghost" data-clear-queue>Clear</button></p>'
           +S.queue.map((q,qi)=>'<div class="queue-item"><span class="q-num">'+(qi+1)+'</span><span>\u2193 '+esc(S.roster[q.out].name)+' ('+POSITIONS[q.pos]+')</span><span class="arrow">\u2192</span><span>\u2191 '+esc(S.roster[q.in].name)+'</span><button class="small" data-unqueue="'+qi+'">Remove</button></div>').join('')
           +'<div class="row"><button data-suggest>Suggest rotation</button></div>'
         :'<p class="muted">No substitutions queued. Tap a field player, then a bench player — or a bench player first, then a field player.</p><div class="row"><button data-suggest>Suggest rotation</button></div>')
-      +'<div class="row"><button data-edit-lineup>Edit lineup</button>'
+      +'</div>'
+      +'<div class="row actions-row"><button data-edit-lineup>Edit lineup</button>'
       +(S.shortMode?'<button data-full-strength>Return to full strength (7v7)</button>':'<button data-play-short>Play short (6v7)</button>')
       +'<button data-edit-goals>Edit goals</button></div>';
   } else if(S.liveTab==='minutes'){
@@ -1420,8 +1847,6 @@ function liveHtml(){
   } else if(S.liveTab==='team'){
     body='<h2>Team — player status</h2><p class="muted">Alphabetical. Notes are private.</p>'+teamRowsHtml()
       +'<h3>Starting lineup (read-only)</h3><div class="field-wrap" style="position:static">'+fieldHtml({readonly:true})+'</div>';
-  } else {
-    body='<h2>Positions</h2><p class="muted">Tap positions to toggle &middot; keep at least one. Preferences guide, never block.</p>'+positionsRowsHtml();
   }
   return '<section aria-label="Live game">'
     +'<div class="scoreboard"><div class="score-row">'
@@ -1435,7 +1860,6 @@ function liveHtml(){
     +'<div class="tabs" role="tablist">'+tabs.map(([k,label])=>'<button role="tab" aria-selected="'+(S.liveTab===k)+'" data-tab="'+k+'">'+label+'</button>').join('')+'</div>'
     +body
     +(SB.role==='driver'&&SB.liveId?'<p class="muted small" style="text-align:center">Game code <strong>'+esc(SB.liveCode)+'</strong> — the other coach enters this code on setup to join.</p>':'')
-    +'<div class="row"><button class="ghost" data-starting-lineup>Starting lineup</button></div>'
     +'</section>';
 }
 function halftimeHtml(){
@@ -1486,7 +1910,7 @@ function suggestRotation(){
 function applyQueue(){
   if(!S.queue.length) return;
   pushUndo('apply subs');
-  for(const q of S.queue){ S.lineup[q.pos]=q.in; }
+  for(const q of S.queue){ placeOnField(S.lineup, q.pos, q.in); }
   S.queue=[]; S.selection=null;
   render();
 }
@@ -1545,8 +1969,22 @@ function startNewGame(){
    preserved — only the short-handed flags are cleared, so setup
    always opens at full strength. */
 function closeFinishedGame(){
+  // An anonymous watcher has no setup screen to go back to (it would
+  // expose the Roster / Settings / History setup tabs), so closing
+  // leaves the live game and returns to the entry screen instead.
+  if (SB.viewerMode && !SB.authUser) { leaveLiveGame(); return; }
   S.removedPositions=[]; S.shortMode=false; S.editingLive=false;
   S.screen='setup'; S.setupTab='history';
+  render();
+}
+/* Leave a live game entirely (anonymous watcher): stop listening,
+   drop the live session and the in-memory game state, back to the
+   entry screen. Nothing is written — a watcher never writes. */
+function leaveLiveGame(){
+  unsubscribeLive();
+  resetLiveSession();
+  S = freshState();
+  SB.historyLoaded = false; SB.historyError = '';
   render();
 }
 async function discardFinishedGame(){
@@ -1563,7 +2001,7 @@ async function discardFinishedGame(){
 function startSecondHalf(){
   if(S.plannedLineup){
     pushUndo('halftime plan');
-    S.lineup=[...S.plannedLineup];
+    S.lineup=dedupeLineup([...S.plannedLineup]);
     S.plannedLineup=null;
   }
   S.halftimeDone=true; S.screen='live'; S.liveTab='actions'; S.running=true;
@@ -1572,7 +2010,7 @@ function startSecondHalf(){
 
 /* ---------- Events (delegation) ---------- */
 document.addEventListener('click', async (e)=>{
-  const t=e.target.closest('[data-spot],[data-bench],[data-tab],[data-pick],[data-scorer],[data-step],[data-close],[data-clear-spot],[data-save-note],[data-pref],[data-remove-pos],[data-goal-minus],[data-goal-plus],[data-goal-del],[data-tired],[data-note],[data-prefs],[data-rename],[data-save-rename],[data-add-player],[data-save-add-player],[data-remove-player],[data-save-roster],[data-attend],[data-unqueue],[data-csv],[data-editgoals],[data-auto],[data-refresh],[data-review],[data-back-setup],[data-start-game],[data-pause],[data-plus2],[data-halftime],[data-end],[data-undo],[data-apply],[data-clear-queue],[data-suggest],[data-edit-lineup],[data-play-short],[data-full-strength],[data-edit-goals],[data-do-swap],[data-cancel-swap],[data-plan-refresh],[data-plan-use],[data-start-second],[data-snap-clock],[data-back-live],[data-takeover-live],[data-conflict-reload],[data-conflict-keep],[data-new-game],[data-csv-last],[data-editgoals-last],[data-confirm-yes],[data-last-lineup],[data-use-preferred],[data-save-preferred],[data-score],[data-signin],[data-signout],[data-close-history],[data-discard-game],[data-starting-lineup],[data-leaving],[data-arrived],[data-setup-tab],[data-details],[data-season-csv],[data-all-history-csv],[data-export-roster],[data-clear-lineup],[data-clear-preferred],[data-manage-preferred],[data-more],[data-pref-inline],[data-halftime-prefs],[data-join-live]');
+  const t=e.target.closest('[data-spot],[data-bench],[data-tab],[data-pick],[data-scorer],[data-step],[data-close],[data-clear-spot],[data-save-note],[data-pref],[data-remove-pos],[data-goal-minus],[data-goal-plus],[data-goal-del],[data-tired],[data-note],[data-prefs],[data-rename],[data-save-rename],[data-add-player],[data-save-add-player],[data-remove-player],[data-save-roster],[data-attend],[data-unqueue],[data-csv],[data-editgoals],[data-auto],[data-refresh],[data-review],[data-back-setup],[data-start-game],[data-pause],[data-plus2],[data-halftime],[data-end],[data-undo],[data-apply],[data-clear-queue],[data-suggest],[data-edit-lineup],[data-play-short],[data-full-strength],[data-edit-goals],[data-do-swap],[data-cancel-swap],[data-plan-refresh],[data-plan-use],[data-start-second],[data-snap-clock],[data-back-live],[data-goto-signin],[data-join-viewer],[data-join-viewer-game],[data-share-viewer],[data-join-active],[data-gen-viewer-link],[data-copy-viewer-link],[data-leave-live],[data-new-game],[data-csv-last],[data-editgoals-last],[data-confirm-yes],[data-last-lineup],[data-use-preferred],[data-save-preferred],[data-score],[data-signin],[data-signout],[data-close-history],[data-discard-game],[data-leaving],[data-arrived],[data-setup-tab],[data-details],[data-season-csv],[data-all-history-csv],[data-export-roster],[data-clear-lineup],[data-clear-preferred],[data-manage-preferred],[data-more],[data-pref-inline],[data-halftime-prefs],[data-join-live]');
   if(!t) return;
   const d=t.dataset;
 
@@ -1588,31 +2026,36 @@ document.addEventListener('click', async (e)=>{
     return;
   }
 
-  // View-only phone: block every edit action. Allowed: switching tabs,
-  // closing modals, copying links, viewing CSVs, and taking over.
-  if(SB.role==='viewer' && SB.liveId){
-    const allowed=new Set(['tab','setupTab','close','takeoverLive','joinLive','confirmYes','csv','csvLast','seasonCsv','allHistoryCsv','exportRoster','details','halftimePrefs','backSetup','conflictReload','conflictKeep']);
+  // Anonymous watchers are strictly view-only: block every edit
+  // action. Allowed: switching tabs, closing modals, viewing history
+  // details, leaving the shared view, and going to sign in (sign-in
+  // is how a watcher gets edit controls). Signed-in coaches are
+  // never gated — any coach can drive, no Take over.
+  if(SB.viewerMode && !SB.authUser){
+    // Share and Join are read-only, so a watcher may use them;
+    // generating/revoking codes is not in this list — only a
+    // signed-in coach gets those controls (and the handler below).
+    const allowed = new Set(['tab','close','confirmYes','joinViewer','joinViewerGame','shareViewer','details','backSetup','closeHistory','leaveLive','gotoSignin']);
     const keys=Object.keys(d);
     if(keys.length && !keys.some(k=>allowed.has(k))){
-      S.error='View-only — the driver is driving this game. Take over to make changes.';
+      S.error='View-only — sign in as a coach to make changes.';
       render(); return;
     }
   }
-  if(d.takeoverLive!==undefined){
-    openConfirm({title:'Take over as driver?', body:'You will drive this game; the other phone becomes view-only.', confirmLabel:'Take over', onConfirm:async ()=>{ await takeOverLive(); }});
+  if(d.gotoSignin!==undefined){ S.showSignin=true; render(); return; }
+  if(d.leaveLive!==undefined){ leaveLiveGame(); return; }
+  // Share onward: copies the SAME viewer link (same code) the
+  // viewer arrived on. No new code, nothing revoked — viewers
+  // cannot generate or revoke codes.
+  if(d.shareViewer!==undefined){
+    if (SB.viewerJoinedCode) { await copyText(viewerLinkUrl(SB.viewerJoinedCode)); showToast('Link copied'); }
     return;
   }
-  if(d.conflictReload!==undefined){
-    const row=SB.conflict?SB.conflict.row:null;
-    SB.conflict=null;
-    if(row){ SB.liveVersion=row.version; applyLiveState(row.state); }
-    render(); return;
-  }
-  if(d.conflictKeep!==undefined){
-    const row=SB.conflict?SB.conflict.row:null;
-    SB.conflict=null;
-    if(row) SB.liveVersion=row.version; // next write is version+1 over theirs
-    render(); return; // render() schedules the debounced driver sync
+  if(d.joinViewerGame!==undefined){ joinViewerGame(d.joinViewerGame); return; }
+  if(d.genViewerLink!==undefined){ await generateViewerCode(); return; }
+  if(d.copyViewerLink!==undefined){
+    if (SB.viewerCode) { await copyText(viewerLinkUrl(SB.viewerCode)); showToast('Link copied'); }
+    return;
   }
 
   if(d.close!==undefined){ closeModal(); return; }
@@ -1621,10 +2064,20 @@ document.addEventListener('click', async (e)=>{
     if(fn) await fn();
     return;
   }
+  if(d.joinViewer!==undefined){
+    const code=((($('#join-code')||{}).value||'').trim().toUpperCase());
+    if(!code){ S.error='Enter the 4-letter view code first.'; render(); return; }
+    await joinViewerCode(code); return;
+  }
   if(d.joinLive!==undefined){
     const code=((($('#join-code')||{}).value||'').trim().toUpperCase());
     if(!code){ S.error='Enter the 4-letter game code first.'; render(); return; }
     await joinLiveGame(code); return;
+  }
+  if(d.joinActive!==undefined){
+    const row=(SB.activeGames||[]).find(g=>g && g.id===d.joinActive);
+    if(!row){ S.error='That live game is no longer available.'; render(); return; }
+    await joinActiveGame(row); return;
   }
   if(d.spot!==undefined){
     const pos=+d.spot;
@@ -1645,8 +2098,8 @@ document.addEventListener('click', async (e)=>{
   }
   if(d.pick!==undefined){
     const i=+d.pick, pos=+d.pos;
-    if(S.screen==='halftime'){ S.plannedLineup[pos]=i; }
-    else { pushUndo('lineup edit'); S.lineup[pos]=i; S.removedPositions=S.removedPositions.filter(x=>x!==pos); }
+    if(S.screen==='halftime'){ placeOnField(S.plannedLineup, pos, i); }
+    else { pushUndo('lineup edit'); placeOnField(S.lineup, pos, i); S.removedPositions=S.removedPositions.filter(x=>x!==pos); }
     closeModal(); render(); return;
   }
   if(d.clearSpot!==undefined){
@@ -1743,10 +2196,15 @@ document.addEventListener('click', async (e)=>{
     if(S.lineup.some(x=>x==null)){ S.error='Fill all 7 spots before starting — tap an empty spot to choose a player.'; render(); return; }
     S.screen='review'; render(); return;
   }
-  if(d.backSetup!==undefined){ S.screen='setup'; S.editingLive=false; render(); return; }
+  if(d.backSetup!==undefined){
+    // An anonymous watcher has no setup screen to go back to (it
+    // would expose the Roster / Settings tabs), so this leaves the
+    // live game and returns to the entry screen instead.
+    if (SB.viewerMode && !SB.authUser) { leaveLiveGame(); return; }
+    S.screen='setup'; S.editingLive=false; render(); return;
+  }
   if(d.closeHistory!==undefined){ closeFinishedGame(); return; }
   if(d.discardGame!==undefined){ discardFinishedGame(); return; }
-  if(d.startingLineup!==undefined){ openStartingLineup(); return; }
   if(d.leaving!==undefined){
     const i=+d.leaving; closeModal(); pushUndo('player leaving');
     S.roster[i].present=false;
@@ -1829,14 +2287,14 @@ document.addEventListener('click', async (e)=>{
     if(!S.lastLineup) return;
     closeModal();
     S.removedPositions=[]; S.shortMode=false;
-    S.lineup=S.lastLineup.map(i=>S.roster[i]&&S.roster[i].present?i:null);
+    S.lineup=dedupeLineup(S.lastLineup.map(i=>S.roster[i]&&S.roster[i].present?i:null));
     render(); return;
   }
   if(d.usePreferred!==undefined){
     if(!S.preferredLineup) return;
     closeModal();
     S.removedPositions=[]; S.shortMode=false;
-    S.lineup=S.preferredLineup.map(i=>S.roster[i]&&S.roster[i].present?i:null); render(); return;
+    S.lineup=dedupeLineup(S.preferredLineup.map(i=>S.roster[i]&&S.roster[i].present?i:null)); render(); return;
   }
   if(d.savePreferred!==undefined){
     closeModal();
@@ -1848,7 +2306,12 @@ document.addEventListener('click', async (e)=>{
   if(d.score!==undefined){
     const k=d.score;
     if(k==='us-plus'){ openScorerPicker('us'); return; }
-    if(k==='them-plus'){ openScorerPicker('them'); return; }
+    // THEM + records the goal immediately — no scorer picker: there is
+    // no scorer of ours to pick for an opponent goal. The goal is
+    // logged with no scorer (unknown), at the current minute; the
+    // display rule hides unknown opponent goals from the Goals list,
+    // so only the score changes.
+    if(k==='them-plus'){ scorerMinute=Math.floor(S.elapsed/60); recordGoal('them','skip'); return; }
     if(k==='us-minus'){
       pushUndo('remove goal');
       const idx=[...S.goals].map((g,i)=>i).reverse().find(i=>S.goals[i].side==='us');
@@ -1955,6 +2418,17 @@ function handleFieldTap(pos, player){
   if(S.selection && S.selection.kind==='out' && S.selection.pos===pos){
     S.selection=null; render(); return;
   }
+  // Bench-first completion comes before the queue check below: once
+  // a sub is already queued, a plain field tap starts a new
+  // field-first selection — but a tap that completes a bench-first
+  // selection must still queue the sub, even with a queue pending.
+  if(S.selection && S.selection.kind==='in'){
+    // A spot that already has a queued sub can't take another one.
+    if(S.queue.find(q=>q.pos===pos)) return;
+    const incoming=S.selection.player;
+    S.queue.push({out:player, in:incoming, pos});
+    S.selection=null; render(); return;
+  }
   // No swap while a substitution queue is pending.
   if(S.queue.length){
     S.selection={kind:'out', player, pos}; render(); return;
@@ -1963,22 +2437,25 @@ function handleFieldTap(pos, player){
     // Second field tap stages a swap.
     S.swapPair=[S.selection.pos, pos]; S.selection=null; render(); return;
   }
-  if(S.selection && S.selection.kind==='in'){
-    // Bench-first: bench player selected, field tap completes the sub.
-    const incoming=S.selection.player;
-    S.queue.push({out:player, in:incoming, pos});
-    S.selection=null; render(); return;
-  }
   S.selection={kind:'out', player, pos}; render();
 }
 function handleBenchTap(i){
+  // A bench player already queued to come on can't be picked again:
+  // they keep only their queued highlight, never a second one, and
+  // the same player can never be queued twice.
+  if(S.queue.find(x=>x.in===i)) return;
+  // A staged swap is untouched by bench taps — no bench-first
+  // selection starts while a swap is waiting on the Swap button.
+  if(S.swapPair.length===2) return;
   if(S.selection && S.selection.kind==='out'){
     // Field-first: complete the queued sub. Reset selection so a second sub can start immediately.
     S.queue.push({out:S.selection.player, in:i, pos:S.selection.pos});
     S.selection=null; render(); return;
   }
   if(S.selection && S.selection.kind==='in' && S.selection.player===i){ S.selection=null; render(); return; }
-  // Bench-first: mark this bench player as the selected incoming player.
+  // Bench-first: mark this bench player as the selected incoming
+  // player. Tapping a different bench player switches the selection
+  // to them; the field tap that follows completes the sub.
   S.selection={kind:'in', player:i, pos:-1}; render();
 }
 
@@ -1986,8 +2463,17 @@ function handleBenchTap(i){
 /* Post-sign-in entry (or already-signed-in / unconfigured entry):
    roster, then history. This runs only after the login gate has
    passed — never before sign-in. A live game is joined by typing its
-   4-letter code on the Setup screen, never via a link. */
+   4-letter game code on the Setup screen; a shared view is joined
+   with a viewer code, or by opening a ?view= link. */
 async function enterApp(){
+  S.showSignin = false;
+  // A watcher who signs in keeps watching that game: do not reload
+  // the roster or history over the live snapshot. Signing in also
+  // promotes them from view-only to a coach who can drive.
+  if (SB.liveId || SB.viewerMode) {
+    if (SB.viewerMode && SB.authUser) { SB.role = 'driver'; startViewerPoll(); }
+    render(); return;
+  }
   if (SB.configured && SB.authUser) await loadRoster();
   if (SB.configured) await loadHistory();
   render();
@@ -2000,8 +2486,19 @@ async function enterApp(){
   // match UI. Without a config there is no login at all.
   if (SB.configured) await checkAuthSession();
   else SB.authChecked = true;
-  render(); // login screen if gated, match UI otherwise
-  if (authGated()) {
+  render(); // entry screen if gated, match UI otherwise
+  // Shared view link (?view=CODE): join it directly, signed in or
+  // not — no sign-in needed to watch. A bad code falls through to
+  // the normal entry below, with the error shown.
+  let viewCode = null;
+  try { viewCode = new URLSearchParams(window.location.search).get('view'); } catch (e) { viewCode = null; }
+  if (viewCode && SB.configured) {
+    const ok = await joinViewerCode(viewCode);
+    if (ok) { /* joined — the viewer screen is up; nothing more to do */ }
+    else if (authGated()) { /* stay on the entry screen with the error */ }
+    else { await enterApp(); }
+    // fall through to the listeners below
+  } else if (authGated()) {
     // Wait for sign-in; the Sign in button calls enterApp() on success.
   } else {
     await enterApp();
@@ -2010,9 +2507,11 @@ async function enterApp(){
   window.addEventListener('offline', () => { SB.online = false; SB.offline = true; render(); });
   window.addEventListener('online', async () => {
     SB.online = true; SB.offline = false;
-    if (SB.configured && SB.authUser) {
-      await loadHistory();
-      if (SB.role === 'viewer' && SB.liveCode) {
+    if (SB.configured) {
+      if (SB.authUser) await loadHistory();
+      if (SB.viewerMode && !SB.authUser) {
+        await refreshViewer();
+      } else if (SB.role === 'viewer' && SB.liveCode) {
         const row = await fetchLiveRow();
         if (row) handleRemoteLive(row);
       } else if (SB.role === 'driver' && SB.liveId) {

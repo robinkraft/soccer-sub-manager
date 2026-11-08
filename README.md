@@ -7,9 +7,12 @@ app Robin actually used for the game, with the private app's screens,
 labels, controls and business rules, verified against its screenshots.)
 Vanilla HTML/CSS/JS — **no build step, no Muse runtime**. The only
 external script is the Supabase JS client (CDN), used only when Supabase
-is configured — see below. When Supabase is configured, **sign-in is
-required**: coaches sign in with email + password (Supabase Auth) before
-history or a live game will load at all.
+is configured — see below. When Supabase is configured, **coaches
+sign in** with email + password (Supabase Auth) before history, the
+roster, or driving a game will load — and any signed-in coach can
+drive, no Take over. **Watching needs no sign-in**: anyone with a
+viewer code (from the coach's shared link) can watch live and see
+history, view-only.
 
 ## Files
 
@@ -19,6 +22,7 @@ history or a live game will load at all.
   Supabase history + live sync
 - `supabase-config.js` — Supabase project URL + anon key (empty by default; fill in to turn the backend on)
 - `supabase/schema.sql` — the three tables (`game_history`, `live_games`, `team_roster`) + RLS policies; run once in Supabase for a new project
+- `supabase/add-viewer-access.sql` — anonymous viewing through a checked code (`viewer_codes` table + the SECURITY DEFINER `viewer_access()` function; anon gets no direct table reads); run once on an existing project, safe to re-run
 - `supabase/add-team-roster.sql` — adds only `team_roster` to a project that already has the other two tables; run once, safe to re-run
 - `supabase/add-private-parity.sql` — adds `team_roster.preferred_lineup` (preferred lineup persists server-side), `game_history.elapsed_seconds` (actual played time, shown as "52:02 played"), and an authenticated-only DELETE policy on `game_history` for "Discard this game"; run once, safe to re-run
 - `docs/history-import.md` — how the private app's 10 past games get into Supabase `game_history` (import script lives outside this repo — see that doc)
@@ -60,10 +64,18 @@ only in Supabase, behind coach login. Review first, then push.
 
 With no config, the app is in-memory only (see below). With Supabase
 configured, the team roster, finished games, and the live game all
-live in Supabase — **but only after a coach signs in**.
-Row Level Security on all three tables is authenticated-only: the anon /
-publishable key alone gets nothing (no select, insert, update, or
-delete). Setup, once, in your Supabase account:
+live in Supabase — the roster and all writes **only after a coach
+signs in**. Row Level Security is authenticated-only on every table:
+the anon / publishable key alone gets nothing. Anonymous viewing is
+not an open table read: it goes through the SECURITY DEFINER
+function `viewer_access(code)`, which returns the live games (if any
+are running) and the history only when the code matches an active row
+in `viewer_codes`. The coach generates the code in the app
+(Settings → Share a view link); generating a new link deactivates
+the old one. The code is the key, and a 4-letter code is guessable —
+anyone who guesses the active code sees the live game and history
+until the coach generates a new one. Setup, once, in your Supabase
+account:
 
 1. Create a new project at supabase.com (free tier is plenty).
 2. SQL Editor → paste and run `supabase/schema.sql` (creates
@@ -76,7 +88,10 @@ delete). Setup, once, in your Supabase account:
    re-run the whole file a second time: the `CREATE POLICY` lines
    will error as duplicates.) **If `game_history` and `live_games`
    already exist, run `supabase/add-team-roster.sql` instead** — it
-   adds only `team_roster` and is safe to re-run.
+   adds only `team_roster` and is safe to re-run. On an existing
+   project, also run `supabase/add-viewer-access.sql` once (safe to
+   re-run) — it adds the `viewer_codes` table and the
+   `viewer_access()` function for anonymous viewing.
 3. Database → Replication → enable **Realtime** for the `live_games`
    table (the schema file notes this; history and roster do not need it).
 4. **Create the coach accounts** — Supabase dashboard →
@@ -91,17 +106,22 @@ delete). Setup, once, in your Supabase account:
    and push / redeploy. That is the only config the app needs.
 
 Sign in on the phone with one of the coach accounts from step 4.
-The login screen appears before any roster, history, or live game
-loads, and the match UI is not rendered behind it. After sign-in the
-saved roster loads from `team_roster` (see "Roster" below); if no
-roster is saved yet, the fictional sample roster is shown instead.
+Before sign-in the app shows an entry screen: join a shared view
+with a viewer code (no account, view-only — see below) or sign in.
+After sign-in the saved roster loads from `team_roster` (see
+"Roster" below); if no roster is saved yet, the fictional sample
+roster is shown instead.
 
 ### History
 
 - After sign-in, page load loads `game_history` newest-first into the
   History tab, with season totals (games, total / average minutes per
-  player) and season CSV export. Before sign-in, history does not load
-  at all — the login screen is all there is.
+  player) and season CSV export. Before sign-in, history loads only
+  for a viewer who entered a valid viewer code — after joining the
+  shared view, on the live screen's History tab (or the shared-view
+  home screen when no game is running), read-only and with no CSV
+  downloads. A visitor who never entered a code sees nothing but
+  the entry screen.
 - Confirmed End game inserts one row: date, score, per-player totals
   (goalie-adjusted per the "Count goalie time" setting, goalie minutes
   separately, minutes by position), goals (player, or own goal), and
@@ -119,11 +139,24 @@ roster is saved yet, the fictional sample roster is shown instead.
   as the private Muse app's SQLite `app.db`, with Supabase as the
   server instead.
 - The other coach signs in, opens Setup → Lineup, and enters the
-  4-letter game code in **Join a live game**. That phone is **view-only**: it sees the
-  field, bench, queue, score, clock, and minutes live via Supabase
-  Realtime, all edit controls are blocked with a clear banner, and it
-  can **Take over** (with confirmation) to become the driver — the
-  first phone then becomes view-only.
+  4-letter game code in **Join a live game**. That phone drives the
+  game immediately — any signed-in coach can drive, no Take over;
+  concurrent edits resolve last-write-wins under the version check,
+  and remote changes appear live with a small floating "Updated"
+  note, never a banner.
+- **Anyone else can watch too, without signing in or having an
+  account**: the coach shares a view link (Settings → Share a view
+  link — it generates a 4-letter viewer code and copies a
+  `?view=CODE` link, with the plain code shown for reading out
+  loud). Opening the link — or entering the code on the app's entry
+  screen — shows the shared-view home: the live games in progress,
+  each with a Join button, and history below, view-only, with no
+  roster tab, no settings, and no CSV downloads. A viewer can pass
+  the view on with "Share this view", which copies the same link —
+  viewers never generate or revoke codes. Generating a new link
+  turns off the old one. See
+  `docs/live-game-design.md` ("Anonymous viewing") for the full
+  can / cannot list and the code-guessability tradeoff.
 - The clock is stored as an anchor (elapsed at anchor + anchor start
   time + running), never written every second. Driver writes are
   debounced ~1–2s and only on actions (Apply, score, pause, queue
@@ -267,22 +300,24 @@ Supabase and the sample names are gone from the screen.
 
 ## Joining a live game (game code)
 
-No links, no texting. The driver starts the game and the app shows a
-4-letter game code as plain text on the live screen. The other coach
-signs in, opens Setup → Lineup, types the code into **Join a live
-game**, and taps **Join live game** — that phone becomes view-only and
-sees the game live. Take over (with confirmation) swaps the driver.
-The `?game=` URL parameter and the old `#s=` / `#g=` texted links
-were removed entirely in Nov 2026; the v5 link format code is gone
-with them.
+No links to text for coaches: the driver starts the game and the app
+shows a 4-letter game code as plain text on the live screen. The
+other coach signs in, opens Setup → Lineup, types the code into
+**Join a live game**, and taps **Join live game** — that phone drives
+the game immediately, same as the first. For everyone else, the
+coach shares a view link (Settings → Share a view link): opening it
+— or entering its 4-letter code on the app's entry screen — shows
+the live game and history, view-only. Generating a new link turns
+off the old one. The `?game=` URL parameter and the old `#s=` /
+`#g=` texted links were removed entirely in Nov 2026; the v5 link
+format code is gone with them.
 
 ## Deliberately left out
 
-- **Multi-user sync beyond driver / view-only.** Login is now required
-  (Supabase Auth, authenticated-only RLS), and the live game is one
-  driver with the other coach view-only. Full multi-user sync — both
-  coaches editing at once, per-coach roles, presence — is a future
-  step, not built here.
+- **Multi-user sync beyond any-coach-can-drive.** Coaches sign in
+  (Supabase Auth) and all drive the same live game; anonymous
+  watchers join by viewer code. Full multi-user sync — per-coach
+  roles, presence — is a future step, not built here.
 - **The private app's real roster and server history.** This copy is the
   shared app only.
 - **Anything else that needs a backend** (push, background audio).
