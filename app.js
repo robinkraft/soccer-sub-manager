@@ -2178,11 +2178,12 @@ function render(){
   // the whole live screen down every time.
   if(SB.backendError) html+='<div class="error" role="alert">'+esc(SB.backendError)+'</div>';
   if(SB.offline) html+='<div class="error" role="alert">Offline — changes will sync when signal returns.</div>';
-  // Anonymous watchers are strictly view-only: a banner with the way
-  // in (sign in as a coach to make changes). Signed-in coaches never
-  // see this banner — any coach can drive, no Take over.
-  if(SB.viewerMode && !SB.authUser) html+='<div class="banner">View-only — you are watching the shared view.'
-    +'<div class="row" style="margin-top:8px"><button data-share-viewer>Share this view</button><button data-goto-signin>Sign in as a coach to make changes</button></div></div>';
+  // Anonymous watchers are strictly view-only: one compact line
+  // with the way in (sign in as a coach to make changes) — a small
+  // text row, not a card, so it never pushes the game down the
+  // screen. Signed-in coaches never see this banner — any coach can
+  // drive, no Take over.
+  if(SB.viewerMode && !SB.authUser) html+='<div class="banner banner-viewer"><span>View-only — shared view.</span><button class="banner-link" data-share-viewer>Share this view</button><button class="banner-link" data-goto-signin>Sign in as a coach</button></div>';
   // Driver: sync the live snapshot (debounced) after any render that
   // follows an action. Remote applies set SB.applyingRemote and skip;
   // a render right after applying a remote update skips the sync once
