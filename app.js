@@ -71,6 +71,7 @@ function freshState(){
     screen:'setup',            // setup | review | live | halftime | finished
     setupTab:'lineup',         // lineup | roster | settings | history (setup tabs, private app)
     liveTab:'actions',         // actions | minutes | team (live tabs; the Positions tab was dropped Nov 2026 — prefs are edited on the setup Roster tab, and the Team tab rows already show each player's prefs)
+    viewerTab:'game',          // game | history — the parent read-only switch (viewer game view + viewer home)
     expandedHistory:{},        // history index -> true when its Details card is open
     planCount:1,               // halftime "Lineup N" counter
     teamName:TEAM_DEFAULT,
@@ -81,9 +82,22 @@ function freshState(){
     shortMode:false,
     // live game
     elapsed:0, running:false, ourScore:0, theirScore:0,
-    minutesSec:Array(n).fill(0),   // total field seconds (all positions)
+    // Wall-clock clock (Nov 2026): elapsed is DERIVED, never ticked.
+    // clockBase = seconds banked before the current running stretch;
+    // clockAnchorAt = wall-clock ms when that stretch started (null
+    // while paused). Displayed elapsed = base + (now - anchor) while
+    // running, = base while paused. The same anchor is written into
+    // the live_games row, so every browser derives the same clock.
+    clockBase:0, clockAnchorAt:null,
+    minutesSec:Array(n).fill(0),   // BANKED field seconds (all positions)
     gkSec:Array(n).fill(0),
     posSec:Array.from({length:n},()=>({})), // player -> {pos: seconds}
+    // Open stint per player (null when not on the field or paused):
+    // {start: wall-clock ms the stint began, pos: position index}.
+    // Displayed minutes = banked + (now - start) while on the field
+    // and the clock is running. Stints are part of the synced live
+    // state, so a second browser derives the same player minutes.
+    stints:Array(n).fill(null),
     goals:[],                  // {player:-1|index, seconds:number|null, side:'us'|'them'}
     queue:[],                  // {out,in,pos}
     swapPair:[],               // [posA,posB] staged swap
@@ -131,7 +145,6 @@ const SB = {
   historyLoaded: false, historyError: '',
   liveId: null, liveCode: null, liveVersion: 0, role: null, // 'driver' | 'viewer' | null
   channel: null, syncTimer: null, offline: false,
-  viewerAnchor: null, // {elapsedAtAnchor, anchorStartedAt, running} from the driver
   applyingRemote: false,
   suppressSyncOnce: false,
   // Set when a remote update was just applied: the render that
@@ -307,6 +320,7 @@ function resizeMinuteArrays() {
   S.minutesSec = padArr(S.minutesSec, n, 0);
   S.gkSec = padArr(S.gkSec, n, 0);
   S.posSec = Array.from({ length: n }, (_, i) => (S.posSec && S.posSec[i]) ? { ...S.posSec[i] } : {});
+  S.stints = padArr(S.stints, n, null);
   S.lineup = S.lineup.map(x => (x == null || x < n) ? x : null);
 }
 function rosterSourceLabel() {
@@ -546,12 +560,20 @@ async function syncHistoryGame(h) {
 
 /* --- Live game mapping: whole state <-> live_games.state (schema.sql) --- */
 function buildLiveState() {
+  syncClock();
   return {
     teamName: S.teamName, settings: { ...S.settings },
     roster: S.roster.map(r => ({ name: r.name, prefs: [...r.prefs], present: r.present, tired: r.tired, note: r.note || '' })),
     lineup: [...S.lineup], removedPositions: [...S.removedPositions], shortMode: S.shortMode,
     elapsed: S.elapsed, running: S.running,
-    clock: { elapsed_seconds_at_anchor: S.elapsed, anchor_started_at: S.running ? Date.now() : null, running: S.running },
+    // Clock anchor: the stretch's base + start time, written once per
+    // stretch — never re-based on sync, so a reader always derives
+    // the true elapsed even if this tab was backgrounded for minutes.
+    clock: { elapsed_seconds_at_anchor: S.clockBase, anchor_started_at: S.clockAnchorAt, running: S.running },
+    // Open player stints, same wall-clock design as the clock: a
+    // reader derives each player's live minutes from the banked
+    // totals plus the open stint, with no sync needed mid-stint.
+    stints: S.stints.map(st => st ? { start: st.start, pos: st.pos } : null),
     ourScore: S.ourScore, theirScore: S.theirScore,
     minutesSec: [...S.minutesSec], gkSec: [...S.gkSec],
     posSec: JSON.parse(JSON.stringify(S.posSec)),
@@ -585,16 +607,41 @@ function applyLiveState(st) {
     S.plannedLineup = Array.isArray(st.plannedLineup) ? [...st.plannedLineup] : null;
     S.halftimeDone = !!st.halftimeDone;
     S.startingLineup = Array.isArray(st.startingLineup) ? [...st.startingLineup] : null;
-    // Clock anchor: while running, elapsed advances in real time from the anchor.
+    // Clock anchor + stints: both are wall-clock derived, so any
+    // browser (coach or viewer) shows the same clock and the same
+    // player minutes at the same moment, with no sync needed
+    // mid-stretch. The anchor is the stretch start, not the sync
+    // time — re-basing it on sync was the bug that froze the clock
+    // when the driver's tab was backgrounded.
     const clock = st.clock || {};
     if (clock.running && clock.anchor_started_at) {
-      SB.viewerAnchor = { elapsedAtAnchor: clock.elapsed_seconds_at_anchor || 0, anchorStartedAt: clock.anchor_started_at, running: true };
-      S.elapsed = SB.viewerAnchor.elapsedAtAnchor + (Date.now() - SB.viewerAnchor.anchorStartedAt) / 1000;
+      S.clockBase = clock.elapsed_seconds_at_anchor || 0;
+      S.clockAnchorAt = clock.anchor_started_at;
       S.running = true;
     } else {
-      SB.viewerAnchor = { elapsedAtAnchor: clock.elapsed_seconds_at_anchor != null ? clock.elapsed_seconds_at_anchor : (st.elapsed || 0), anchorStartedAt: null, running: false };
-      S.elapsed = SB.viewerAnchor.elapsedAtAnchor;
+      S.clockBase = clock.elapsed_seconds_at_anchor != null ? clock.elapsed_seconds_at_anchor : (st.elapsed || 0);
+      S.clockAnchorAt = null;
       S.running = false;
+    }
+    S.elapsed = clockElapsed();
+    // Stints, same shape as buildLiveState writes. Rows written by
+    // the old build have none: fall back to the banked totals and,
+    // if the clock is running, open a stint now so minutes start
+    // accruing instead of sitting at 0 — never crash, never zero
+    // out the banked totals.
+    if (Array.isArray(st.stints)) {
+      const now = Date.now();
+      S.stints = Array.from({ length: n }, (_, i) => {
+        const s = st.stints[i];
+        if (!s || typeof s.start !== 'number' || !isFinite(s.start)) return null;
+        // Sanity: a stint cannot start in the future, and one older
+        // than a whole match day is corrupt data, not a stint.
+        if (s.start > now || s.start < now - 12 * 3600 * 1000) return null;
+        return { start: s.start, pos: (typeof s.pos === 'number' && s.pos >= 0 && s.pos < 7) ? s.pos : (S.lineup.indexOf(i) >= 0 ? S.lineup.indexOf(i) : 0) };
+      });
+    } else {
+      S.stints = Array(n).fill(null);
+      if (S.running) openStints();
     }
   } finally {
     SB.applyingRemote = false;
@@ -678,7 +725,7 @@ async function joinLiveGame(code, opts) {
   try {
     const { data, error } = await SB.client.from('live_games').select('*').eq('game_code', code).maybeSingle();
     if (error) throw error;
-    if (!data) { S.error = 'Live game ' + code + ' was not found — check the code.'; render(); return false; }
+    if (!data) { S.error = 'Live game ' + code + ' was not found — check the code.'; S.screen = 'setup'; render(); return false; }
     SB.liveId = data.id; SB.liveCode = code; SB.liveVersion = data.version; SB.role = 'driver'; SB.offline = false;
     SB.viewerMode = false;
     applyLiveState(data.state);
@@ -699,6 +746,7 @@ async function joinLiveGame(code, opts) {
     return true;
   } catch (e) {
     S.error = 'Could not load live game.';
+    if (S.screen === 'loading') S.screen = 'setup';
     render();
     return false;
   }
@@ -722,12 +770,13 @@ async function joinViewerCode(code) {
   try {
     const { data, error } = await SB.client.rpc('viewer_access', { p_code: code });
     if (error) throw error;
-    if (!data || !data.ok) { S.error = 'That view code was not found — check the code.'; render(); return false; }
+    if (!data || !data.ok) { S.error = 'That view code was not found — check the code.'; if (S.screen === 'loading') S.screen = 'setup'; render(); return false; }
     SB.viewerMode = true; SB.viewerJoinedCode = code;
     applyViewerAccess(data);
     return true;
   } catch (e) {
     S.error = 'Could not load the shared view.';
+    if (S.screen === 'loading') S.screen = 'setup';
     render();
     return false;
   }
@@ -789,7 +838,7 @@ function joinViewerGame(id, opts) {
   SB.rosterFromLive = true; SB.rosterFromBackend = false;
   if (live.phase === 'halftime') S.screen = 'halftime';
   else S.screen = 'live';
-  S.liveTab = 'actions';
+  S.liveTab = 'actions'; S.viewerTab = 'game'; // joining a game shows the game, not the history tab left over from the home screen
   if (SB.authUser) subscribeLive(); // coaches get Realtime, not the anon poll
   // Deep link: ?view=CODE&game=CODE — pasting it joins this game.
   if (!opts || opts.push !== false) pushGameUrl(live.game_code);
@@ -848,6 +897,17 @@ async function refreshViewer() {
    (same code, no new code — only a coach can generate or revoke). */
 function viewerHtml(){
   const lives = SB.viewerLives || [];
+  // Same Game / History switch as the viewer game view, so a parent
+  // on a history-only link can still flip between the two without
+  // leaving the page. Game shows the live-games list; History shows
+  // the same games-first history + season totals as the game view.
+  const tabs=[['game','Game'],['history','History']];
+  const switchHtml='<div class="tabs" role="tablist">'+tabs.map(([k,label])=>'<button role="tab" aria-selected="'+(S.viewerTab===k)+'" data-viewer-tab="'+k+'">'+label+'</button>').join('')+'</div>';
+  const shareRow='<div class="row"><button data-share-viewer>Share this view</button><button data-leave-live>Leave shared view</button></div>';
+  if (S.viewerTab === 'history') {
+    return '<section aria-label="Shared view"><h2>Shared view</h2>'
+      + switchHtml + '<h3>History</h3>' + historyHtml() + shareRow + '</section>';
+  }
   const gamesHtml = lives.length
     ? lives.map(g => {
         const st = (g.state) || {};
@@ -858,11 +918,52 @@ function viewerHtml(){
           + '<div class="muted">' + esc(score) + ' &middot; ' + fmtClock(activeGameElapsed(st)) + '</div>'
           + '<div class="row" style="margin-top:8px"><button class="primary grow" data-join-viewer-game="' + esc(g.id) + '">Join</button></div></div>';
       }).join('')
-    : '<p class="muted">No live game right now — past games below. When the coach starts a game, it appears here live.</p>';
+    : '<p class="muted">No live game right now. When the coach starts a game, it appears here live.</p>';
   return '<section aria-label="Shared view"><h2>Shared view</h2>'
+    + switchHtml
     + gamesHtml
-    + '<div class="row"><button data-share-viewer>Share this view</button><button data-leave-live>Leave shared view</button></div>'
-    + '<h3>History</h3>' + historyHtml() + '</section>';
+    + shareRow + '</section>';
+}
+/* Parent read-only game view (Nov 2026): an anonymous viewer opening
+   a shared link gets this, never the coach screen. No score buttons,
+   no pause, no Apply, no Halftime / End game — just the score, the
+   clock, the field and the bench, plus a Game / History switch at
+   the top. Switching tabs is a render only: the live state is never
+   re-fetched or reset, and the 3-second viewer poll keeps the game
+   live underneath. Coaches never see this — a signed-in coach drives
+   the normal Actions / Minutes / Team tabs. */
+function viewerGameHtml(){
+  const tabs=[['game','Game'],['history','History']];
+  const switchHtml='<div class="tabs" role="tablist">'+tabs.map(([k,label])=>'<button role="tab" aria-selected="'+(S.viewerTab===k)+'" data-viewer-tab="'+k+'">'+label+'</button>').join('')+'</div>';
+  // Read-only scoreboard: same layout as the coach's, without the
+  // score buttons or the clock controls. The clock keeps its id so
+  // the display tick and the visibility catch-up keep it live.
+  const scoreboard='<div class="scoreboard"><div class="score-row">'
+    +'<div class="side"><div class="score-col"><span class="team-label">US</span><span class="score-num">'+S.ourScore+'</span></div></div>'
+    +'<div class="clock-mid"><div class="clock" id="clock">'+fmtClock(S.elapsed)+'</div></div>'
+    +'<div class="side"><div class="score-col"><span class="team-label">THEM</span><span class="score-num">'+S.theirScore+'</span></div></div>'
+    +'</div></div>';
+  const shareRow='<div class="row"><button data-share-viewer>Share this view</button><button data-leave-live>Leave shared view</button></div>';
+  if (S.viewerTab === 'history') {
+    return '<section aria-label="Shared view"><h2>Shared view</h2>'
+      + scoreboard + switchHtml + '<h3>History</h3>' + historyHtml() + shareRow + '</section>';
+  }
+  const goals = displayGoals(S.goals).length
+    ? '<h3>Goals</h3>' + displayGoals(S.goals).map(g=>'<p>'+esc(goalLabel(g))+' ('+(g.side==='us'?'US':'THEM')+')</p>').join('')
+    : '<h3>Goals</h3><p class="muted">No goals yet.</p>';
+  // Bench as plain rows, not buttons: a parent tapping a bench
+  // player must not hit the view-only gate, so there is nothing to tap.
+  const bench = benchPlayers();
+  const benchRows = bench.length
+    ? '<div class="bench v-bench">' + bench.map(i=>'<div class="v-bench-row"><span class="b-name">'+esc(S.roster[i].name)+'</span><span class="b-mins v-mins" data-player="'+i+'">'+Math.round(totalSec(i)/60)+'m</span></div>').join('') + '</div>'
+    : '<p class="muted">Bench is empty — everyone present is on the field.</p>';
+  return '<section aria-label="Live game">'
+    + scoreboard
+    + (S.screen === 'halftime' ? '<p class="muted" style="text-align:center">Halftime</p>' : '')
+    + switchHtml
+    + '<div class="field-wrap">'+fieldHtml({readonly:true, showMinutes:true})+'</div>'
+    + '<div class="bench-head"><h3>Bench</h3></div>' + benchRows
+    + goals + shareRow + '</section>';
 }
 /* ---------- Share a view link (coach, Settings tab) ---------- */
 /* One active viewer code at a time. Generating a new link deactivates
@@ -1079,6 +1180,11 @@ async function routeFromUrl(){
       if (SB.viewerMode && SB.authUser) { SB.role = 'driver'; startViewerPoll(); }
       return true; // already in that game
     }
+    // Joining a named game (first load, back/forward): never show
+    // the previous screen while it loads — the neutral loading state
+    // until the join resolves. The join itself renders the game, or
+    // the plain not-found message.
+    S.screen = 'loading'; render();
     if (SB.viewerMode && SB.viewerJoinedCode) {
       const live = (SB.viewerLives || []).find(g => g && g.game_code === gameCode);
       if (live) { joinViewerGame(live.id, {push:false}); return true; }
@@ -1097,7 +1203,7 @@ async function routeFromUrl(){
       // Viewer link with a game, not joined yet (e.g. back-button
       // into a viewer URL): join the view first, then the game.
       const ok = await joinViewerCode(viewCode);
-      if (!ok) return true; // joinViewerCode shows the error
+      if (!ok) { if (S.screen === 'loading') S.screen = 'setup'; render(); return true; } // joinViewerCode shows the error
       return await routeFromUrl();
     }
     return false; // needs sign-in first; enterApp routes after sign-in
@@ -1255,16 +1361,134 @@ function showToast(text){
 function resetLiveSession() {
   unsubscribeLive();
   if (SB.viewerTimer) { clearInterval(SB.viewerTimer); SB.viewerTimer = null; }
-  SB.liveId = null; SB.liveCode = null; SB.liveVersion = 0; SB.role = null; SB.viewerAnchor = null;
+  SB.liveId = null; SB.liveCode = null; SB.liveVersion = 0; SB.role = null;
   SB.viewerMode = false; SB.viewerHistoryJson = ''; SB.viewerJoinedCode = ''; SB.viewerLives = [];
   SB.activeGames = []; SB.activeGamesLoaded = false; SB.activeGamesLoading = false;
 }
+
+/* ---------- Wall-clock clock + player stints ---------- */
+/* Root cause (Nov 2026): the clock and the player minutes were both
+   accumulated by a 1-second setInterval tick. iOS/Safari throttles
+   that timer when the tab is backgrounded — and a second browser has
+   its own counter anyway — so the clock froze on one phone while the
+   game ran on, and players sat at 0m while the clock read 04:39.
+   Nothing here ticks a counter any more: elapsed and player minutes
+   are both DERIVED from wall-clock timestamps, so a backgrounded tab
+   catches up the instant it returns and a second browser can never
+   drift — it reads the same anchor and the same stint starts. */
+function clockElapsed(){
+  return S.clockBase + (S.running && S.clockAnchorAt ? (Date.now() - S.clockAnchorAt) / 1000 : 0);
+}
+/* Refresh the derived cache. Called at the top of render(), in the
+   1-second display tick, and on visibilitychange/focus, so S.elapsed
+   is never more than a second stale in the foreground and is exact
+   the moment a backgrounded tab returns. */
+function syncClock(){ S.elapsed = clockElapsed(); }
+/* Seconds in a player's current open stint, right now. Zero when
+   they are on the bench, or while the clock is paused (stints are
+   banked and closed on pause — see bankStints). */
+function stintSec(i){
+  const st = S.stints[i];
+  return (st && st.start && S.running) ? Math.max(0, (Date.now() - st.start) / 1000) : 0;
+}
+/* Live (banked + open stint) values. Every display path uses these;
+   the banked arrays are only the settled part. The goalie-time
+   setting applies to the live values exactly as it did to the
+   banked ones. */
+function liveMinutesSec(i){ return (S.minutesSec[i] || 0) + stintSec(i); }
+function liveGkSec(i){
+  const st = S.stints[i];
+  return (S.gkSec[i] || 0) + ((st && st.start && st.pos === 0) ? stintSec(i) : 0);
+}
+function livePosSec(i, pos){
+  const st = S.stints[i];
+  const p = POSITIONS[pos];
+  return ((S.posSec[i] || {})[p] || 0) + ((st && st.start && st.pos === pos) ? stintSec(i) : 0);
+}
+/* Full per-position map with live values (for the finished-game record). */
+function livePosSecAll(i){
+  const out = { ...(S.posSec[i] || {}) };
+  const st = S.stints[i];
+  if (st && st.start) {
+    const p = POSITIONS[st.pos];
+    out[p] = (out[p] || 0) + stintSec(i);
+  }
+  return out;
+}
+/* Bank every open stint into the banked arrays and close it. Called
+   at every transition where the field or the clock changes: pause,
+   halftime, end/finish, sub applied, swap, a player leaving the
+   field, Edit lineup. Banking then re-opening at the same instant
+   loses nothing (banked + new stint from now == continuous time). */
+function bankStints(){
+  const now = Date.now();
+  for (let i = 0; i < S.stints.length; i++) {
+    const st = S.stints[i];
+    if (!st || !st.start) continue;
+    const sec = Math.max(0, (now - st.start) / 1000);
+    S.minutesSec[i] = (S.minutesSec[i] || 0) + sec;
+    const p = POSITIONS[st.pos];
+    S.posSec[i] = S.posSec[i] || {};
+    S.posSec[i][p] = (S.posSec[i][p] || 0) + sec;
+    if (st.pos === 0) S.gkSec[i] = (S.gkSec[i] || 0) + sec;
+    S.stints[i] = null;
+  }
+}
+/* Open a stint for every player currently on the field who has none.
+   Stints start at now (a subbed-in player starts from the sub, not
+   from the stretch start). Called on resume, kickoff, second half,
+   and after any lineup change while the clock is running. */
+function openStints(){
+  if (!S.running) return;
+  const now = Date.now();
+  onField().forEach(({ player, pos }) => { if (!S.stints[player]) S.stints[player] = { start: now, pos }; });
+}
+/* Pause: bank the elapsed and every stint, freeze the clock. */
+function pauseClock(){
+  syncClock(); bankStints();
+  S.clockBase = S.elapsed; S.running = false; S.clockAnchorAt = null;
+}
+/* Resume: start a fresh running stretch at now and open stints. */
+function resumeClock(){
+  S.running = true; S.clockAnchorAt = Date.now(); openStints();
+}
+/* Refresh the clock and the live minute displays without a full
+   render — a render every second would keep re-arming the debounced
+   live sync and starve it. Field chips and bench buttons show live
+   minutes, so their text is updated here too; chips that do not show
+   minutes (setup, starting-lineup view) have an empty .mins span
+   and are left alone. */
+function refreshClockDom(){
+  syncClock();
+  const c = $('#clock'); if (c) c.textContent = fmtClock(S.elapsed);
+  const mins = $('#live-minutes-inline'); if (mins) mins.innerHTML = minutesRowsHtml();
+  document.querySelectorAll('[data-spot]').forEach(el => {
+    const m = el.querySelector('.mins');
+    if (!m || m.textContent === '') return;
+    const pos = +el.dataset.spot, p = S.lineup[pos];
+    if (p != null && !S.removedPositions.includes(pos)) m.textContent = Math.round(totalSec(p) / 60) + 'm';
+  });
+  document.querySelectorAll('[data-bench]').forEach(el => {
+    const m = el.querySelector('.b-mins');
+    if (m) m.textContent = Math.round(totalSec(+el.dataset.bench) / 60) + 'm';
+  });
+  // Parent read-only bench rows show the same live minutes.
+  document.querySelectorAll('.v-mins').forEach(el => {
+    el.textContent = Math.round(totalSec(+el.dataset.player) / 60) + 'm';
+  });
+}
+/* A backgrounded tab catches up the instant it returns: re-derive
+   from the wall-clock anchor/stints and re-render, which also
+   re-syncs the fresh state for the other browsers. */
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { refreshClockDom(); render(); } });
+window.addEventListener('focus', () => { refreshClockDom(); render(); });
 
 /* ---------- Undo ---------- */
 function snapshotGame(){
   return JSON.parse(JSON.stringify({
     lineup:S.lineup, removedPositions:S.removedPositions, shortMode:S.shortMode,
-    elapsed:S.elapsed, ourScore:S.ourScore, theirScore:S.theirScore,
+    elapsed:S.elapsed, running:S.running, clockBase:S.clockBase, clockAnchorAt:S.clockAnchorAt,
+    stints:S.stints, ourScore:S.ourScore, theirScore:S.theirScore,
     minutesSec:S.minutesSec, gkSec:S.gkSec, posSec:S.posSec, goals:S.goals,
     queue:S.queue, rosterPresent:S.roster.map(r=>r.present), rosterTired:S.roster.map(r=>r.tired),
   }));
@@ -1277,7 +1501,10 @@ function undoLast(){
   const u=S.undoStack.pop(); if(!u) return;
   const s=u.snap;
   S.lineup=s.lineup; S.removedPositions=s.removedPositions; S.shortMode=s.shortMode;
-  S.elapsed=s.elapsed; S.ourScore=s.ourScore; S.theirScore=s.theirScore;
+  S.elapsed=s.elapsed; S.running=s.running; S.clockBase=s.clockBase||0; S.clockAnchorAt=s.clockAnchorAt||null;
+  S.stints=Array.isArray(s.stints)?s.stints.map(st=>st?{start:st.start,pos:st.pos}:null):Array(S.roster.length).fill(null);
+  syncClock();
+  S.ourScore=s.ourScore; S.theirScore=s.theirScore;
   S.minutesSec=s.minutesSec; S.gkSec=s.gkSec; S.posSec=s.posSec; S.goals=s.goals; S.queue=s.queue;
   s.rosterPresent.forEach((p,i)=>{S.roster[i].present=p;});
   s.rosterTired.forEach((t,i)=>{S.roster[i].tired=t;});
@@ -1292,8 +1519,8 @@ function benchPlayers(){
   const on=new Set(S.lineup.filter(x=>x!=null));
   return S.roster.map((r,i)=>i).filter(i=>!on.has(i) && S.roster[i].present);
 }
-function totalSec(i){ // total counted toward game time, per goalie toggle
-  return S.settings.countGoalieTime ? S.minutesSec[i] : (S.minutesSec[i]-S.gkSec[i]);
+function totalSec(i){ // total counted toward game time, per goalie toggle — LIVE values (banked + open stint)
+  return S.settings.countGoalieTime ? liveMinutesSec(i) : (liveMinutesSec(i)-liveGkSec(i));
 }
 function fairShareSec(){
   // Fair share is computed on the same counted basis as the totals:
@@ -1408,28 +1635,15 @@ let clockTimer=null;
 
 function startClock(){
   if(clockTimer) return;
-  clockTimer=setInterval(()=>{
-    if(!S.running) return;
-    // View-only phone: the clock comes from the driver's anchor, not
-    // from local ticking — never credit minutes locally on a viewer.
-    if(SB.role==='viewer' && SB.liveId && SB.viewerAnchor && SB.viewerAnchor.running){
-      S.elapsed = SB.viewerAnchor.elapsedAtAnchor + (Date.now() - SB.viewerAnchor.anchorStartedAt) / 1000;
-      const c=$('#clock'); if(c) c.textContent=fmtClock(S.elapsed);
-      return;
-    }
-    S.elapsed+=1;
-    // Credit 1 second to everyone currently on the field.
-    onField().forEach(({player,pos})=>{
-      S.minutesSec[player]+=1;
-      const p=POSITIONS[pos];
-      S.posSec[player][p]=(S.posSec[player][p]||0)+1;
-      if(pos===0) S.gkSec[player]+=1;
-    });
-    const c=$('#clock'); if(c) c.textContent=fmtClock(S.elapsed);
-    const mins=$('#live-minutes-inline'); if(mins) mins.innerHTML=minutesRowsHtml();
-    // The clock keeps running past full time (private app): overage
-    // shows next to the clock. It never stops itself — End game does.
-  },1000);
+  // Display-only tick: re-derives the clock and the live minute
+  // displays from the wall-clock anchor/stints once a second. It
+  // never increments a counter and never credits minutes — a
+  // throttled or backgrounded tab simply shows the derived values
+  // when it runs again, and visibilitychange/focus re-derives
+  // immediately on return. The clock keeps running past full time
+  // (private app): overage shows next to the clock. It never stops
+  // itself — End game does.
+  clockTimer=setInterval(()=>{ if(!S.running) return; refreshClockDom(); },1000);
 }
 function fieldSpotHtml(pos, opts){
   const p=S.lineup[pos];
@@ -1497,20 +1711,23 @@ function benchHtml(){
     const q=S.queue.find(x=>x.in===i);
     const sel=S.selection && S.selection.kind==='in' && S.selection.player===i;
     const cls=['', S.roster[i].tired?'tired':'', sel?'selected':'', q?'queued-on':''].join(' ');
-    // Private bench: one line — name left, minutes right. A queued-in
-    // player instead shows the position badge and "for <out>" on a
-    // second line, with no minutes.
+    // Same component treatment as a field chip: the name is the only
+    // in-flow content and centres itself; the minutes and the queued
+    // pairing live in the bottom strip, in the same format as the
+    // field chip ("0m" clean, "0m → Name" queued — the arrow names
+    // the counterpart, the player this one is paired with); the
+    // queued badge is the same brown pill on the top edge ("↑ POS",
+    // the field chip's outgoing badge reads "↓ POS"). The strip is
+    // always rendered (minutes always, pairing only when queued) and
+    // absolutely positioned, so the name stays vertically centred and
+    // the button is exactly the same height whether or not it has a
+    // queued sub — the button never grows.
     const name=esc(S.roster[i].name)+(S.roster[i].tired?' <span class="tired-dot">\u25cf</span>':'');
-    const top=q
-      ? '<span class="b-name">'+name+'</span><span class="b-badge">\u2191 '+POSITIONS[q.pos]+'</span>'
-      : '<span class="b-name">'+name+'</span><span class="b-mins">'+Math.round(totalSec(i)/60)+'m</span>';
-    // The "for <out>" line is always rendered (empty when no sub is
-    // incoming) and absolutely positioned at the bottom of the button
-    // (see .b-sub in styles.css), so the name stays vertically
-    // centred and the button is exactly the same height whether or
-    // not it has a queued sub — the button never grows.
-    const sub='<span class="b-sub">'+(q?'for '+esc(S.roster[q.out].name):'')+'</span>';
-    return '<button class="'+cls+'" data-bench="'+i+'">'+top+sub+'</button>';
+    const badge=q?'<span class="b-badge">\u2191 '+POSITIONS[q.pos]+'</span>':'';
+    const mins='<span class="b-mins">'+Math.round(totalSec(i)/60)+'m</span>';
+    const pair=q?'<span class="b-pair">\u2192 '+esc(S.roster[q.out].name)+'</span>':'';
+    const sub='<span class="b-sub">'+mins+pair+'</span>';
+    return '<button class="'+cls+'" data-bench="'+i+'">'+badge+'<span class="b-name">'+name+'</span>'+sub+'</button>';
   }).join('')+'</div>';
 }
 function minutesRowsHtml(){
@@ -1518,7 +1735,7 @@ function minutesRowsHtml(){
   present.sort((a,b)=>totalSec(b)-totalSec(a));
   return present.map(i=>{
     const f=flagFor(i), g=goalsFor(i);
-    const gk=S.gkSec[i]>0 ? ' <span class="flag gk">GK '+fmtMin(S.gkSec[i])+'</span>' : '';
+    const gk=liveGkSec(i)>0 ? ' <span class="flag gk">GK '+fmtMin(liveGkSec(i))+'</span>' : '';
     return '<div class="mrow"><div><span class="name">'+esc(S.roster[i].name)+'</span>'
       +(g?' <span title="Goals">⚽ '+g+'</span>':'')
       +(S.roster[i].tired?' <span class="tired-dot">● tired</span>':'')+gk+'</div>'
@@ -1864,7 +2081,7 @@ function removePlayer(i){
   // Clear the stack instead of restoring the wrong players.
   S.undoStack=[];
   S.roster.splice(i,1);
-  S.minutesSec.splice(i,1); S.gkSec.splice(i,1); S.posSec.splice(i,1);
+  S.minutesSec.splice(i,1); S.gkSec.splice(i,1); S.posSec.splice(i,1); S.stints.splice(i,1);
   S.lineup=S.lineup.map(x=>x==null?null:(x===i?null:(x>i?x-1:x)));
   if(S.startingLineup) S.startingLineup=S.startingLineup.map(x=>x==null?null:(x===i?null:(x>i?x-1:x)));
   if(S.plannedLineup) S.plannedLineup=S.plannedLineup.map(x=>x==null?null:(x===i?null:(x>i?x-1:x)));
@@ -1890,7 +2107,24 @@ function openEditGoalsLive(){
 }
 
 /* ---------- Screens ---------- */
+/* Neutral loading state for a game deep link (Nov 2026): reloading
+   ?view=CODE&game=XXXX (or ?game=XXXX) used to flash the whole setup
+   screen — Join card, preferred lineup, roster selector — before the
+   game arrived. A parent just trying to watch never needs to see
+   any of that, so while the route resolves the page shows only this:
+   plain dark screen, no buttons, no roster, nothing to tap. */
+function loadingHtml(){
+  return '<section aria-label="Loading game" style="min-height:60vh;display:flex;align-items:center;justify-content:center"><p class="muted" style="font-size:17px">Loading game&hellip;</p></section>';
+}
 function render(){
+  // Loading a game deep link: the neutral screen above, before the
+  // login gate — a parent opening a shared link must never see the
+  // setup screen or the sign-in form flash by while the game loads.
+  if (S.screen === 'loading') { mainEl.innerHTML = loadingHtml(); return; }
+  // The clock and minutes are wall-clock derived — refresh the cache
+  // first, so every render (and every sync it schedules) works from
+  // the true elapsed, never a stale ticked value.
+  syncClock();
   // Login gate: when Supabase is configured and nobody is signed in,
   // show the entry screen (join a live game without signing in, or
   // sign in as a coach) — no match UI, no history, no roster behind
@@ -1934,7 +2168,7 @@ function render(){
   else if(S.screen==='setup') html+=setupHtml();
   else if(S.screen==='review') html+=reviewHtml();
   else if(S.screen==='live') html+=liveHtml();
-  else if(S.screen==='halftime') html+=halftimeHtml();
+  else if(S.screen==='halftime') html+=(SB.viewerMode && !SB.authUser) ? viewerGameHtml() : halftimeHtml();
   else if(S.screen==='finished') html+=finishedHtml();
   mainEl.innerHTML=html;
   // Finished game opens scrolled to the top so the score is visible
@@ -2039,6 +2273,9 @@ function reviewHtml(){
     +'<div class="row"><button class="primary grow" data-start-game'+(empty?' disabled':'')+'>Start game</button><button data-back-setup>Back to setup</button></div></section>';
 }
 function liveHtml(){
+  // Anonymous viewers get the parent read-only view (Game / History
+  // switch), never the coach tabs and edit controls.
+  if (SB.viewerMode && !SB.authUser) return viewerGameHtml();
   // Viewers (signed-in coaches and anonymous code-joined watchers
   // alike) get a History tab on the live screen: it is the only way
   // an anonymous watcher can see history, since they have no setup
@@ -2157,16 +2394,20 @@ function suggestRotation(){
 function applyQueue(){
   if(!S.queue.length) return;
   pushUndo('apply subs');
+  bankStints(); // bank the outgoing players' stints before the field changes
   for(const q of S.queue){ placeOnField(S.lineup, q.pos, q.in); }
   S.queue=[]; S.selection=null;
+  openStints(); // the incoming players' stints start now
   render();
 }
 function doSwap(){
   if(S.swapPair.length!==2) return;
   pushUndo('swap');
+  bankStints(); // bank the old-position split, then restart both in their new spots
   const [a,b]=S.swapPair;
   const tmp=S.lineup[a]; S.lineup[a]=S.lineup[b]; S.lineup[b]=tmp;
   S.swapPair=[]; S.selection=null;
+  openStints();
   render();
 }
 function recordGoal(side, player){
@@ -2179,10 +2420,10 @@ function recordGoal(side, player){
   closeModal(); render();
 }
 async function finishGame(){
-  S.running=false;
+  pauseClock(); // bank the elapsed and every open stint — the saved totals are the true ones
   const players=S.roster.map((r,i)=>({
-    name:r.name, present:r.present, seconds:totalSec(i), gkSeconds:S.gkSec[i],
-    goals:goalsFor(i), posSeconds:S.posSec[i],
+    name:r.name, present:r.present, seconds:totalSec(i), gkSeconds:liveGkSec(i),
+    goals:goalsFor(i), posSeconds:livePosSecAll(i),
   }));
   const game={date:new Date().toLocaleDateString(), dateISO:new Date().toISOString().slice(0,10), teamName:S.teamName,
     ourScore:S.ourScore, theirScore:S.theirScore, lineup:[...(S.startingLineup||S.lineup)],
@@ -2247,18 +2488,22 @@ async function discardFinishedGame(){
   }});
 }
 function startSecondHalf(){
+  // Stints were already banked when the clock paused for halftime, so
+  // nothing is open to bank here — the snapshot below must keep the
+  // pre-halftime stints/clock intact for Undo.
   if(S.plannedLineup){
     pushUndo('halftime plan');
     S.lineup=dedupeLineup([...S.plannedLineup]);
     S.plannedLineup=null;
   }
-  S.halftimeDone=true; S.screen='live'; S.liveTab='actions'; S.running=true;
+  S.halftimeDone=true; S.screen='live'; S.liveTab='actions';
+  resumeClock(); // fresh running stretch at now; stints open for the new lineup
   render();
 }
 
 /* ---------- Events (delegation) ---------- */
 document.addEventListener('click', async (e)=>{
-  const t=e.target.closest('[data-spot],[data-bench],[data-tab],[data-pick],[data-scorer],[data-step],[data-close],[data-clear-spot],[data-save-note],[data-pref],[data-remove-pos],[data-goal-minus],[data-goal-plus],[data-goal-del],[data-tired],[data-note],[data-prefs],[data-rename],[data-save-rename],[data-add-player],[data-save-add-player],[data-remove-player],[data-save-roster],[data-attend],[data-unqueue],[data-csv],[data-editgoals],[data-auto],[data-refresh],[data-review],[data-back-setup],[data-start-game],[data-pause],[data-plus2],[data-halftime],[data-end],[data-shutdown-game],[data-undo],[data-apply],[data-clear-queue],[data-suggest],[data-edit-lineup],[data-play-short],[data-full-strength],[data-edit-goals],[data-do-swap],[data-plan-refresh],[data-plan-use],[data-start-second],[data-snap-clock],[data-back-live],[data-goto-signin],[data-join-viewer],[data-join-viewer-game],[data-share-viewer],[data-join-active],[data-gen-viewer-link],[data-copy-viewer-link],[data-leave-live],[data-new-game],[data-csv-last],[data-editgoals-last],[data-confirm-yes],[data-last-lineup],[data-use-preferred],[data-save-preferred],[data-score],[data-signin],[data-signout],[data-close-history],[data-discard-game],[data-leaving],[data-arrived],[data-setup-tab],[data-details],[data-season-csv],[data-all-history-csv],[data-export-roster],[data-clear-lineup],[data-clear-preferred],[data-manage-preferred],[data-more],[data-pref-inline],[data-halftime-prefs],[data-join-live]');
+  const t=e.target.closest('[data-spot],[data-bench],[data-tab],[data-viewer-tab],[data-pick],[data-scorer],[data-step],[data-close],[data-clear-spot],[data-save-note],[data-pref],[data-remove-pos],[data-goal-minus],[data-goal-plus],[data-goal-del],[data-tired],[data-note],[data-prefs],[data-rename],[data-save-rename],[data-add-player],[data-save-add-player],[data-remove-player],[data-save-roster],[data-attend],[data-unqueue],[data-csv],[data-editgoals],[data-auto],[data-refresh],[data-review],[data-back-setup],[data-start-game],[data-pause],[data-plus2],[data-halftime],[data-end],[data-shutdown-game],[data-undo],[data-apply],[data-clear-queue],[data-suggest],[data-edit-lineup],[data-play-short],[data-full-strength],[data-edit-goals],[data-do-swap],[data-plan-refresh],[data-plan-use],[data-start-second],[data-snap-clock],[data-back-live],[data-goto-signin],[data-join-viewer],[data-join-viewer-game],[data-share-viewer],[data-join-active],[data-gen-viewer-link],[data-copy-viewer-link],[data-leave-live],[data-new-game],[data-csv-last],[data-editgoals-last],[data-confirm-yes],[data-last-lineup],[data-use-preferred],[data-save-preferred],[data-score],[data-signin],[data-signout],[data-close-history],[data-discard-game],[data-leaving],[data-arrived],[data-setup-tab],[data-details],[data-season-csv],[data-all-history-csv],[data-export-roster],[data-clear-lineup],[data-clear-preferred],[data-manage-preferred],[data-more],[data-pref-inline],[data-halftime-prefs],[data-join-live]');
   if(!t) return;
   const d=t.dataset;
 
@@ -2283,7 +2528,7 @@ document.addEventListener('click', async (e)=>{
     // Share and Join are read-only, so a watcher may use them;
     // generating/revoking codes is not in this list — only a
     // signed-in coach gets those controls (and the handler below).
-    const allowed = new Set(['tab','close','confirmYes','joinViewer','joinViewerGame','shareViewer','details','backSetup','closeHistory','leaveLive','gotoSignin']);
+    const allowed = new Set(['tab','viewerTab','close','confirmYes','joinViewer','joinViewerGame','shareViewer','details','backSetup','closeHistory','leaveLive','gotoSignin']);
     const keys=Object.keys(d);
     if(keys.length && !keys.some(k=>allowed.has(k))){
       S.error='View-only — sign in as a coach to make changes.';
@@ -2399,7 +2644,7 @@ document.addEventListener('click', async (e)=>{
     const name=(($('#add-player-text')||{}).value||'').trim();
     if(!name){ S.error='Enter a name first.'; render(); return; }
     S.roster.push({name, prefs:['ST','RM','CM','LM','RB','LB'], present:true, tired:false, note:''});
-    S.minutesSec.push(0); S.gkSec.push(0); S.posSec.push({});
+    S.minutesSec.push(0); S.gkSec.push(0); S.posSec.push({}); S.stints.push(null);
     closeModal(); render(); saveRosterAuto(); return;
   }
   if(d.removePlayer!==undefined){
@@ -2419,11 +2664,12 @@ document.addEventListener('click', async (e)=>{
     const i=+d.attend; S.roster[i].present=!S.roster[i].present;
     if(!S.roster[i].present){
       const pos=S.lineup.indexOf(i);
-      if(pos>=0) S.lineup[pos]=null; // only the absent starter's spot clears
+      if(pos>=0){ bankStints(); S.lineup[pos]=null; openStints(); } // only the absent starter's spot clears
     }
     render(); return;
   }
   if(d.tab!==undefined){ S.liveTab=d.tab; render(); return; }
+  if(d.viewerTab!==undefined){ S.viewerTab=d.viewerTab; render(); return; }
   if(d.setupTab!==undefined){ S.setupTab=d.setupTab; render(); return; }
   if(d.details!==undefined){ const hi=+d.details; S.expandedHistory[hi]=!S.expandedHistory[hi]; render(); return; }
   if(d.seasonCsv!==undefined){ downloadCsv('full-season.csv', seasonCsv()); return; }
@@ -2467,7 +2713,7 @@ document.addEventListener('click', async (e)=>{
     const i=+d.leaving; closeModal(); pushUndo('player leaving');
     S.roster[i].present=false;
     const pos=S.lineup.indexOf(i);
-    if(pos>=0) S.lineup[pos]=null; // departing player keeps minutes; spot can be filled from the bench
+    if(pos>=0){ bankStints(); S.lineup[pos]=null; openStints(); } // departing player keeps minutes; spot can be filled from the bench
     render(); return;
   }
   if(d.arrived!==undefined){
@@ -2480,24 +2726,29 @@ document.addEventListener('click', async (e)=>{
     // never starts with an empty required spot.
     const empty = emptySpotsLabel();
     if (empty) { S.error='Fill '+empty+' to start.'; S.screen='review'; render(); return; }
-    S.screen='live'; S.liveTab='actions'; S.elapsed=0; S.running=true;
+    S.screen='live'; S.liveTab='actions';
+    S.clockBase=0; S.clockAnchorAt=Date.now(); S.running=true; S.elapsed=0;
     S.minutesSec=Array(S.roster.length).fill(0); S.gkSec=Array(S.roster.length).fill(0);
-    S.posSec=Array.from({length:S.roster.length},()=>({})); S.goals=[]; S.queue=[]; S.ourScore=0; S.theirScore=0;
+    S.posSec=Array.from({length:S.roster.length},()=>({})); S.stints=Array(S.roster.length).fill(null);
+    S.goals=[]; S.queue=[]; S.ourScore=0; S.theirScore=0;
     S.undoStack=[]; S.halftimeDone=false; S.plannedLineup=null;
     S.startingLineup=[...S.lineup];
+    openStints(); // the starting seven's stints begin at kickoff
     render();
     // Driver: create the live row (fire-and-forget; the game works
     // in-memory even if Supabase is unreachable).
     startLiveDriver();
     return;
   }
-  if(d.pause!==undefined){ S.running=!S.running; render(); return; }
+  if(d.pause!==undefined){ if(S.running) pauseClock(); else resumeClock(); render(); return; }
   if(d.plus2!==undefined){
     // +2:00 credits to players currently on the field; no stint close/reopen.
     onField().forEach(({player,pos})=>{ S.minutesSec[player]+=120; S.posSec[player][POSITIONS[pos]]=(S.posSec[player][POSITIONS[pos]]||0)+120; if(pos===0) S.gkSec[player]+=120; });
-    S.elapsed+=120; render(); return;
+    // The clock is wall-clock derived: moving the base moves the
+    // display, running or paused, with no anchor change needed.
+    S.clockBase+=120; syncClock(); render(); return;
   }
-  if(d.halftime!==undefined){ S.running=false; S.plannedLineup=null; S.screen='halftime'; render(); return; }
+  if(d.halftime!==undefined){ pauseClock(); S.plannedLineup=null; S.screen='halftime'; render(); return; }
   if(d.end!==undefined){
     openConfirm({title:'End the game?', body:'The finished summary and CSV will be saved to this session’s history.', confirmLabel:'End game', onConfirm:()=>{ finishGame(); }});
     return;
@@ -2512,12 +2763,14 @@ document.addEventListener('click', async (e)=>{
     return;
   }
   if(d.undo!==undefined){ undoLast(); return; }
-  if(d.editLineup!==undefined){ S.running=false; S.editingLive=true; S.screen='setup'; render(); return; }
+  if(d.editLineup!==undefined){ pauseClock(); S.editingLive=true; S.screen='setup'; render(); return; }
   if(d.playShort!==undefined){ openShortChooser(); return; }
   if(d.removePos!==undefined){
     const pos=+d.removePos; pushUndo('play short');
+    bankStints();
     const player=S.lineup[pos]; S.lineup[pos]=null;
     S.removedPositions=[pos]; S.shortMode=true; closeModal();
+    openStints();
     render(); return;
   }
   if(d.fullStrength!==undefined){
@@ -2534,7 +2787,11 @@ document.addEventListener('click', async (e)=>{
   if(d.planUse!==undefined){ render(); return; }
   if(d.startSecond!==undefined){ startSecondHalf(); return; }
   if(d.snapClock!==undefined){
-    S.elapsed=S.settings.matchMinutes*30; render(); return;
+    // Re-base the running stretch so the clock reads exactly the
+    // half boundary; paused, it just moves the banked total.
+    S.clockBase=S.settings.matchMinutes*30;
+    if(S.running) S.clockAnchorAt=Date.now();
+    syncClock(); render(); return;
   }
   if(d.backLive!==undefined){ S.editingLive=false; S.screen='live'; render(); return; }
   if(d.newGame!==undefined){ startNewGame(); pushUrl(homeUrl()); return; }
@@ -2751,6 +3008,10 @@ async function enterApp(){
     const routed = await routeFromUrl();
     if (routed) return;
   }
+  // The deep link did not resolve to a game (bad code, or sign-in
+  // needed): leave the loading screen behind — the login gate shows
+  // the entry screen for an unsigned coach, setup for a signed-in one.
+  if (S.screen === 'loading') S.screen = 'setup';
   if (SB.configured && SB.authUser) await loadRoster();
   if (SB.configured) await loadHistory();
   render();
@@ -2763,6 +3024,13 @@ async function enterApp(){
   // match UI. Without a config there is no login at all.
   if (SB.configured) await checkAuthSession();
   else SB.authChecked = true;
+  // A game deep link (?game= or ?view=CODE&game=) must never flash
+  // the setup screen: show the neutral loading state until the route
+  // resolves, then render the game (or the plain not-found message)
+  // directly. A plain URL keeps the normal setup/entry first paint.
+  let urlHasGame = false;
+  try { const p = new URLSearchParams(window.location.search); urlHasGame = !!(p.get('game') || p.get('view')); } catch (e) {}
+  if (urlHasGame) S.screen = 'loading';
   render(); // entry screen if gated, match UI otherwise
   // Shared view link (?view=CODE): join it directly, signed in or
   // not — no sign-in needed to watch. A bad code falls through to
@@ -2772,7 +3040,7 @@ async function enterApp(){
   if (viewCode && SB.configured) {
     const ok = await joinViewerCode(viewCode);
     if (ok) { await routeFromUrl(); /* ?view=CODE&game=... lands in that game */ }
-    else if (authGated()) { /* stay on the entry screen with the error */ }
+    else if (authGated()) { /* stay on the entry screen with the error — off the loading screen first, and paint it */ if (S.screen === 'loading') S.screen = 'setup'; render(); }
     else { await enterApp(); }
     // fall through to the listeners below
   } else if (authGated()) {

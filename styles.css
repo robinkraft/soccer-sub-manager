@@ -133,21 +133,32 @@ details summary{font-weight:800;cursor:pointer;min-height:44px;display:flex;alig
 .apply-slot{min-height:58px;margin-top:6px;display:flex;align-items:center}
 .apply-slot .apply{margin:0}
 
-/* Bench — dark cards, queued-in highlighted pale green */
+/* Bench — the SAME component treatment as the field chips (Nov 2026):
+   the name is the only in-flow content and centres itself; minutes
+   and the queued pairing live in one absolutely-positioned strip at
+   the bottom, in the same "0m" / "0m → Name" format as the field
+   chip; the queued badge is the same brown pill on the top edge
+   ("↑ POS", the field chip's is "↓ POS"); a queued bench player
+   uses the same pale-yellow highlight as a queued field chip. The
+   only differences left are the backgrounds (white chip on green
+   field vs dark card on navy) — the treatment is identical. */
 .bench{display:flex;flex-wrap:wrap;gap:6px}
-.bench button{flex:1 1 30%;height:46px;padding:3px 8px;font-size:14px;border-radius:12px;line-height:1.2;white-space:normal;overflow-wrap:anywhere;background:#16283a;border-color:var(--line2);color:var(--ink);text-align:left;display:flex;flex-wrap:wrap;align-items:center;align-content:center;justify-content:space-between;gap:0 6px;position:relative}
+.bench button{flex:1 1 30%;height:46px;padding:3px 8px;font-size:14px;border-radius:12px;line-height:1.1;background:#16283a;border:2px solid var(--line2);color:var(--ink);text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;white-space:normal;overflow-wrap:anywhere}
 .bench button .b-name{font-weight:800;white-space:nowrap}
-.bench button .b-mins{color:var(--muted);font-size:13px;font-weight:700}
-.bench button .b-badge{background:#166534;color:#fff;border-radius:999px;font-size:10px;font-weight:900;padding:1px 5px}
+.bench button .b-sub{position:absolute;left:2px;right:2px;bottom:1px;display:block;min-height:11px;line-height:1.1;text-align:center}
+.bench button .b-mins{font-size:10px;font-weight:700;color:var(--muted)}
+.bench button .b-pair{margin-left:4px;font-size:10px;font-weight:800;color:#92400e}
+.bench button .b-badge{position:absolute;top:-9px;left:50%;transform:translateX(-50%);white-space:nowrap;font-size:11px;font-weight:900;background:#78350f;color:#fff;border-radius:999px;padding:2px 7px;line-height:1.3;z-index:2}
 .bench button.selected{background:#fef9c3;color:#78350f;border-color:var(--yellow-ring)}
-.bench button.queued-on{background:var(--green-bg);color:#052e16;border-color:#166534}
-.bench button.queued-on .b-mins{color:#166534}
+.bench button.queued-on{background:#fef9c3;border-color:#b45309;color:#78350f}
+.bench button.queued-on .b-mins{color:#475569}
 .bench button.tired{border-color:#f97316;box-shadow:inset 0 0 0 2px #f97316}
-/* "for <out>" line: absolutely positioned at the bottom of the
-   button, so it never pushes the name up — the name + minutes row
-   stays vertically centred whether or not a sub is queued. Always
-   rendered (empty when absent); button height stays fixed. */
-.bench .b-sub{position:absolute;left:8px;right:8px;bottom:2px;display:block;min-height:12px;line-height:1.2;font-size:11px;font-weight:700;color:#166534;text-align:left}
+/* Parent read-only bench rows (viewer game view): the same dark card
+   as a bench button, but a plain row — nothing to tap. */
+.v-bench{display:flex;flex-wrap:wrap;gap:6px}
+.v-bench-row{flex:1 1 30%;height:46px;padding:3px 8px;font-size:14px;border-radius:12px;line-height:1.2;background:#16283a;border:2px solid var(--line2);color:var(--ink);display:flex;align-items:center;justify-content:space-between;gap:0 6px}
+.v-bench-row .b-name{font-weight:800;white-space:nowrap}
+.v-bench-row .b-mins{color:var(--muted);font-size:13px;font-weight:700}
 /* Bench heading: "Bench" left, small hint right (private app) */
 .bench-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:6px 0 4px}
 .bench-head h3{margin:0}

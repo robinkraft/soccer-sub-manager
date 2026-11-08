@@ -130,10 +130,14 @@ create table if not exists public.live_games (
   -- { team_name, settings, roster, lineup, bench, queue, swap_staging,
   --   score: {us, them}, goals, tired, present, minutes/stints,
   --   clock: { elapsed_seconds_at_anchor, anchor_started_at, running },
-  --   halftime_plan, notes }
+  --   stints: [{start, pos} | null] per roster index, halftime_plan, notes }
   -- The clock is an anchor, NOT a ticking value: elapsed = anchor
   -- elapsed + (now - anchor_started_at) while running, so the app
-  -- does not write to Supabase every second.
+  -- does not write to Supabase every second. The anchor is the
+  -- running stretch's start, never re-based on sync. Player minutes
+  -- work the same way: displayed minutes = banked minutesSec/gkSec/
+  -- posSec + (now - stint start) for the open stint, so a second
+  -- browser derives the same minutes with no sync mid-stint.
   state jsonb not null default '{}'::jsonb
 );
 

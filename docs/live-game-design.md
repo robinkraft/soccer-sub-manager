@@ -58,13 +58,84 @@ One row per active game. Schema in `supabase/schema.sql`.
 
 ## Clock (no per-second writes)
 
-The clock is an anchor, not a ticking value:
+The clock is an anchor, not a ticking value — and the anchor is the
+stretch start, never re-based on sync (Nov 2026: re-basing it at sync
+time was the bug that froze the clock when the driver's tab was
+backgrounded, because the banked value came from the throttled local
+tick):
 
 - `state.clock = { elapsed_seconds_at_anchor, anchor_started_at, running }`
-- While running: displayed elapsed = anchor elapsed + (now − anchor time)
-- Pause / +2:00 / halftime snap / resume all just move the anchor
+  — `elapsed_seconds_at_anchor` is the banked base, `anchor_started_at`
+  is the wall-clock ms the current running stretch began.
+- While running: displayed elapsed = base + (now − anchor start).
+  While paused: displayed elapsed = base.
+- Pause banks the elapsed and the open stints, clears the anchor;
+  resume sets a fresh anchor at now; +2:00 adds 120s to the base;
+  halftime snap re-bases the running stretch to the half boundary.
 - Writes happen on actions (Apply, score, pause, queue change), debounced
-  ~1–2s, never once a second
+  ~1–2s, never once a second. A reader needs no write at all to show
+  the true clock — it derives it from the anchor.
+- The 1-second timer is display-only: it re-derives the clock and the
+  live minute displays from the anchor/stints. It never increments a
+  counter. A backgrounded tab re-derives on `visibilitychange`/`focus`
+  and catches up the instant it returns.
+
+## Player minutes (stints, same wall-clock design)
+
+Per-player minutes had the same tick problem (players at 0m while the
+clock read 04:39), so they are derived the same way:
+
+- `state.stints` — one entry per roster index: `{start, pos}` while the
+  player is on the field and the clock is running, `null` otherwise.
+  Displayed minutes = banked `minutesSec`/`gkSec`/`posSec` + (now − start).
+- Stints are banked and closed at every transition (pause, halftime,
+  end, sub applied, swap, a player leaving the field, Edit lineup) and
+  re-opened on resume, kickoff, second half, and after any lineup
+  change. The goalie-time split and the per-position breakdown come
+  from the same stints, so they stay correct too.
+- Rows written by older builds have no `stints`: a reader falls back
+  to the banked totals and, if the clock is running, opens a stint at
+  join time so minutes accrue instead of sitting at 0. No new columns
+  were needed — stints live inside the `state` jsonb, so there is no
+  migration file for this change.
+
+## Reloading a game link (no setup flash)
+
+Reloading `?view=CODE&game=XXXX` (or `?game=XXXX`) never renders the
+setup screen: while the route resolves the page shows a neutral
+"Loading game…" screen — no roster selector, no Join card, no buttons
+— then renders the game directly. A genuinely missing/ended game shows
+the plain in-app message, never setup. A plain URL still opens setup.
+
+## Parent read-only view (Game / History)
+
+An anonymous viewer opening a shared link gets a read-only game view,
+never the coach screen: score + clock only (no score buttons, no
+pause, no Apply, no Halftime/End game), the field and bench as plain
+read-only rows, and a Game / History switch at the top. History shows
+the same games-first history + season totals as the viewer home,
+read-only, no CSV downloads. Switching tabs is a render only — the
+live state is never re-fetched or reset, and the viewer poll keeps the
+game live underneath. The viewer home has the same switch (Game shows
+the live-games list). Coaches keep the Actions / Minutes / Team tabs.
+
+## Player chips: one component everywhere
+
+A player chip looks the same whether it is on the setup field, the
+live field, or the bench — the only differences are context (setup
+spots show just the position label when empty; live chips show
+minutes) and background (white chip on the green field vs dark card
+on navy):
+
+- 48px field chip / 46px bench button, fixed heights, never shifting.
+- The name is the only in-flow content and is vertically (and
+  horizontally) centred in every state.
+- Minutes and the queued pairing live in one absolutely-positioned
+  strip at the bottom, same format everywhere: "0m" clean,
+  "0m → Name" queued (the arrow names the counterpart player).
+- A queued player uses the same pale-yellow highlight on field and
+  bench, with the same brown pill badge on the top edge: "↓ POS"
+  for the player going off the field, "↑ POS" for the one coming on.
 
 ## Realtime flow
 
