@@ -1,0 +1,132 @@
+/* Sub Manager (shared) — portable source. Vanilla CSS, no dependencies.
+   Phone-first: 390x844 target. High contrast, large touch targets (>=44px). */
+*{box-sizing:border-box}
+:root{
+  --ink:#111827; --muted:#374151; --bg:#f4f6f8; --card:#ffffff;
+  --line:#cbd5e1; --green:#166534; --green-bg:#dcfce7; --yellow:#facc15;
+  --yellow-bg:#fef9c3; --red:#b91c1c; --red-bg:#fee2e2; --blue:#1d4ed8;
+  --blue-bg:#dbeafe; --field:#15803d; --field-line:#ffffff;
+}
+html,body{margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  background:var(--bg); color:var(--ink); font-size:16px; line-height:1.35;
+  -webkit-text-size-adjust:100%}
+#app{max-width:480px;margin:0 auto;min-height:100vh;background:var(--bg);padding-bottom:90px}
+header.app-head{background:#111827;color:#fff;padding:10px 12px 8px;position:sticky;top:0;z-index:20}
+header.app-head h1{font-size:19px;margin:0;line-height:1.2}
+header.app-head p{margin:2px 0 0;font-size:12px;color:#d1d5db}
+main{padding:10px 10px 0}
+h2{font-size:18px;margin:14px 0 8px}
+h3{font-size:16px;margin:12px 0 6px}
+p{margin:6px 0}
+button{font:inherit;cursor:pointer;min-height:44px;border-radius:10px;border:2px solid #111827;
+  background:#fff;color:var(--ink);padding:8px 12px;font-weight:700}
+button.primary{background:var(--yellow);border-color:#111827}
+button.danger{background:var(--red-bg);border-color:var(--red);color:var(--red)}
+button.ghost{border-color:var(--line);font-weight:600}
+button.small{min-height:36px;padding:4px 10px;font-size:14px;border-radius:8px}
+button:disabled{opacity:.45;cursor:not-allowed}
+button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:3px solid var(--blue);outline-offset:2px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px;margin:8px 0}
+.muted{color:var(--muted);font-size:14px}
+.small{font-size:13px}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.row>*{flex:0 0 auto}
+.spread{justify-content:space-between}
+.grow{flex:1 1 auto}
+label{font-weight:700;font-size:14px}
+input[type=text],input[type=number],input[type=email],input[type=password],textarea,select{font:inherit;padding:9px 10px;border:2px solid #111827;border-radius:8px;background:#fff;color:var(--ink);width:100%}
+input[type=number]{width:84px}
+textarea{min-height:90px;resize:vertical}
+details{border:1px solid var(--line);border-radius:10px;background:#fff;padding:8px 10px;margin:8px 0}
+details summary{font-weight:800;cursor:pointer;min-height:44px;display:flex;align-items:center}
+
+/* Scoreboard */
+.scoreboard{background:#111827;color:#fff;border-radius:12px;padding:10px;text-align:center}
+.scoreboard .clock{font-size:34px;font-weight:900;letter-spacing:1px;line-height:1.05}
+.scoreboard .score{font-size:28px;font-weight:900;margin:4px 0}
+.scoreboard .score button{min-width:52px;min-height:44px;font-size:22px;border-radius:10px;border:2px solid #fff;background:#fff;color:#111827}
+.scoreboard .score .team-label{font-size:13px;font-weight:800;letter-spacing:.5px}
+.scoreboard .sub{font-size:13px;color:#d1d5db}
+.clock-row{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:8px}
+.clock-row button{background:#fff;color:#111827;border-color:#fff;min-height:44px}
+
+/* Tabs — selected tab yellow, under scoreboard */
+.tabs{display:flex;gap:6px;margin:10px 0 0;position:sticky;top:64px;z-index:15;background:var(--bg);padding:6px 0}
+.tabs button{flex:1;min-height:44px;background:#e5e7eb;border-color:#111827}
+.tabs button[aria-selected="true"]{background:var(--yellow)}
+
+/* Field — same component on setup / review / live / finished */
+.field-wrap{position:sticky;top:118px;z-index:10;background:var(--bg);padding:4px 0 6px}
+.field{background:var(--field);border:3px solid #14532d;border-radius:12px;padding:10px 8px;color:#fff;position:relative}
+.field .f-row{display:flex;gap:8px;justify-content:center;margin:6px 0}
+.field .f-row.mid{justify-content:space-between}
+.field .pos-label{font-size:11px;font-weight:800;letter-spacing:1px;text-transform:uppercase;color:#fff;text-align:center;margin-bottom:2px}
+.spot{flex:1;max-width:118px;min-width:0}
+.spot .chip{position:relative;background:#fff;color:#111827;border:2px solid #111827;border-radius:10px;
+  min-height:48px;padding:6px 4px;display:flex;align-items:center;justify-content:center;text-align:center;
+  font-weight:800;font-size:15px;line-height:1.15;white-space:normal;overflow-wrap:anywhere;width:100%;cursor:pointer}
+.spot .chip.empty{background:rgba(255,255,255,.22);color:#fff;border-style:dashed;border-color:#fff;font-weight:700}
+.spot .chip.removed{background:rgba(0,0,0,.25);color:#fff;border-style:dashed}
+.spot .chip.tired{box-shadow:inset 0 0 0 3px #f97316}
+.spot .chip.selected{box-shadow:0 0 0 3px var(--yellow);background:var(--yellow-bg)}
+.spot .chip.queued-off{background:#fef9c3}
+.spot .chip.queued-on{background:#dcfce7}
+.spot .chip.swap-staged{background:#dbeafe;box-shadow:0 0 0 3px var(--blue)}
+.badge{position:absolute;top:-11px;left:50%;transform:translateX(-50%);white-space:nowrap;
+  font-size:11px;font-weight:900;background:#111827;color:#fff;border-radius:999px;padding:2px 7px;line-height:1.3;z-index:2}
+.badge.off{background:#7f1d1d}.badge.on{background:#166534}
+.pair{font-size:11px;font-weight:800;color:#111827;background:#fff;border:1px solid #111827;border-radius:999px;
+  padding:1px 6px;white-space:nowrap;display:inline-block;margin-top:3px}
+.spot .pair-line{text-align:center;min-height:16px}
+.field .gk-box{border:2px dashed rgba(255,255,255,.7);border-radius:8px;padding:4px 0 2px;margin-top:4px}
+
+/* Bench — compact, above queue */
+.bench{display:flex;flex-wrap:wrap;gap:6px}
+.bench button{flex:1 1 30%;min-height:40px;padding:4px 6px;font-size:14px;border-radius:8px;line-height:1.15;white-space:normal;overflow-wrap:anywhere}
+.bench button.selected{background:var(--yellow-bg);box-shadow:0 0 0 3px var(--yellow)}
+.bench button.queued-on{background:var(--green-bg)}
+.bench button.tired{border-color:#f97316;box-shadow:inset 0 0 0 2px #f97316}
+.bench .b-sub{font-size:11px;font-weight:700;color:var(--muted);display:block}
+
+/* Queue */
+.queue-item{display:flex;gap:8px;align-items:center;background:var(--yellow-bg);border:2px solid #111827;border-radius:10px;padding:8px;margin:6px 0;font-weight:700}
+.queue-item .arrow{font-size:20px}
+.queue-item button{margin-left:auto}
+
+/* Minutes / team rows */
+.mrow{display:flex;gap:8px;align-items:center;background:#fff;border:1px solid var(--line);border-radius:10px;padding:8px 10px;margin:6px 0}
+.mrow .name{font-weight:800;min-width:0;overflow-wrap:anywhere}
+.mrow .nums{margin-left:auto;text-align:right;white-space:nowrap;font-weight:700}
+.flag{font-size:12px;font-weight:900;border-radius:999px;padding:2px 8px;white-space:nowrap}
+.flag.low{background:var(--red-bg);color:var(--red)}
+.flag.high{background:var(--yellow-bg);color:#854d0e}
+.flag.ok{background:var(--green-bg);color:var(--green)}
+.flag.gk{background:var(--blue-bg);color:var(--blue)}
+.tired-dot{color:#ea580c;font-weight:900}
+
+/* Picker / modal */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:50;display:flex;align-items:flex-end;justify-content:center}
+.sheet{background:#fff;border-radius:16px 16px 0 0;width:100%;max-width:480px;max-height:88vh;overflow:auto;padding:12px 12px 24px}
+.sheet h2{margin:4px 0 8px}
+.picker-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.picker-grid button{min-height:44px;padding:6px 8px;font-size:15px;text-align:left;white-space:normal;overflow-wrap:anywhere;line-height:1.2}
+.picker-grid button .sub{display:block;font-size:12px;font-weight:600;color:var(--muted)}
+.sheet .pin-bottom{margin-top:8px;display:flex;flex-direction:column;gap:6px}
+.sheet .pin-bottom button{width:100%}
+.stepper{display:flex;gap:8px;align-items:center;justify-content:center;margin:8px 0}
+.stepper button{min-width:52px;font-size:22px}
+.stepper .min-val{font-size:24px;font-weight:900;min-width:90px;text-align:center}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chips button{min-height:40px;padding:4px 10px;font-size:14px}
+.chips button[aria-pressed="true"]{background:var(--yellow)}
+.attend{display:flex;flex-wrap:wrap;gap:6px}
+.attend button{min-height:44px;padding:6px 10px;font-size:14px}
+.attend button.absent{background:#e5e7eb;text-decoration:line-through}
+.note-line{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.banner{background:var(--yellow-bg);border:2px solid #854d0e;border-radius:10px;padding:10px;font-weight:700}
+.notice{background:var(--blue-bg);border:1px solid var(--blue);border-radius:10px;padding:10px}
+.error{background:var(--red-bg);border:2px solid var(--red);color:var(--red);border-radius:10px;padding:10px;font-weight:700}
+footer.foot{padding:16px 12px 40px;color:var(--muted);font-size:13px;text-align:center}
+.hidden{display:none!important}
+@media (max-width:360px){.picker-grid{grid-template-columns:1fr}.bench button{flex-basis:46%}}
