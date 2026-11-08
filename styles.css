@@ -68,6 +68,7 @@ details summary{font-weight:800;cursor:pointer;min-height:44px;display:flex;alig
 /* Halftime / End game / Undo: one small text-button row under the scoreboard, not a row of big buttons */
 .game-actions{display:flex;gap:10px;justify-content:center;align-items:center;padding:2px 0 0}
 .game-actions .linklike{background:none;border:none;color:var(--muted);font-weight:700;font-size:13px;min-height:28px;padding:2px 4px}
+.game-actions .linklike.danger-link{color:var(--red)}
 .game-actions span{color:var(--muted)}
 
 /* Tabs — dark pill, selected tab pale yellow with gold ring */
@@ -100,13 +101,14 @@ details summary{font-weight:800;cursor:pointer;min-height:44px;display:flex;alig
 .pair{font-size:11px;font-weight:800;color:#92400e}
 .field .gk-box{border:2px solid rgba(255,255,255,.55);border-radius:8px;padding:2px 0 0;margin-top:2px}
 
-/* Swap buttons inside the field (live Actions only): absolute overlay
+/* Swap button inside the field (live Actions only): absolute overlay
    in the field's bottom-right corner — zero vertical space, nothing
-   shifts when they appear. The GK chip is centred, so the corner of
-   the goal box is empty. */
-.field-swap{position:absolute;right:6px;bottom:6px;z-index:3;display:flex;flex-direction:column;gap:4px;align-items:stretch}
-.field-swap button{min-height:30px;min-width:88px;padding:2px 8px;font-size:12px;border-radius:8px;white-space:nowrap}
-.field-swap button.ghost{background:rgba(10,22,34,.88);color:#f1f5f9;border-color:rgba(255,255,255,.65)}
+   shifts when it appears. One big button (no Cancel — tapping a
+   staged player un-stages them and the button goes away). The GK chip
+   is centred, so the corner of the goal box is empty: at 360px the
+   button clears the chip by ~9px, at 390px by ~24px. */
+.field-swap{position:absolute;right:6px;bottom:6px;z-index:3}
+.field-swap button{min-height:48px;min-width:96px;padding:8px 14px;font-size:16px;border-radius:12px;white-space:nowrap}
 /* Reserved slot on the live Actions tab: fixed height whether or not
    the Apply button is showing, so queueing a sub never moves
    anything below it. */

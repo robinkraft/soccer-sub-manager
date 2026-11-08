@@ -70,10 +70,34 @@ The clock is an anchor, not a ticking value:
 
 1. Start game → insert one `live_games` row with the game code.
 2. Both phones subscribe (Supabase Realtime, `postgres_changes` on
-   `live_games`) filtered to that code.
+   `live_games`) filtered to that code — UPDATE for live changes,
+   DELETE so a shut-down game disappears live on every phone.
 3. An action on phone A writes version N+1; phone B receives it and
    re-renders field, bench, queue, score, and clock from the snapshot.
 4. End game → insert one `game_history` row, mark the live row `finished`.
+5. Shut down game (coach-only) → delete the `live_games` row; nothing
+   is saved to history. Other coaches' screens go back to setup with
+   the small "Updated" note; viewers see the game disappear on the
+   next poll.
+
+## Deep links
+
+- Every live game has its own URL: `?view=CODE&game=GAMECODE`.
+  The coach's address bar always carries the view code, so copying
+  it shares a link that works for anyone — signed-in coaches get
+  edit rights, everyone else watches view-only. Edit rights come
+  from sign-in only, never from the URL. If no view code exists when
+  a coach opens a game, one is generated on the spot.
+- Opening a game pushes its URL; reloading it re-opens the same
+  game; going back to setup clears it. A URL naming a game that is
+  gone shows a plain not-found message with the way back.
+
+## Starting: no empty spots
+
+- A game never starts with an empty required spot. Kickoff review
+  disables Start game and names the empty positions (e.g. "Fill CM
+  and RB to start"). Short mode (6v7) needs its 6 remaining spots,
+  not 7. The coach fills the spots; the app never auto-fills.
 
 ## Conflicts (two writers)
 

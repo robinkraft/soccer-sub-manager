@@ -249,7 +249,12 @@ function loginHtml() {
 /* Entry screen for anyone not signed in: join a live game with its
    code (no account needed, view-only) or sign in as a coach. */
 function entryHtml() {
-  return '<section aria-label="Watch or sign in"><h2>Watch a live game</h2>'
+  // Errors are shown here too: the login-gate early return in
+  // render() skips the error line, so a wrong view code (or a
+  // failed load) on this screen used to show nothing at all.
+  const err = S.error ? '<div class="error" role="alert">' + esc(S.error) + '</div>' : '';
+  S.error = '';
+  return '<section aria-label="Watch or sign in"><h2>Watch a live game</h2>' + err
     + '<div class="card"><h3>Join a shared view</h3><p class="muted">Enter the 4-letter view code from the coach\u2019s shared link. No account needed — you watch live and see history, view-only.</p>'
     + '<div class="row"><input type="text" id="join-code" placeholder="View code" maxlength="4" autocapitalize="characters" autocomplete="off" style="width:110px;text-transform:uppercase"><button class="primary" data-join-viewer>Watch</button></div></div>'
     + loginHtml()
@@ -611,6 +616,12 @@ function subscribeLive() {
     SB.channel = SB.client.channel('live-' + SB.liveCode)
       .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'live_games', filter: 'game_code=eq.' + SB.liveCode },
         payload => { if (payload && payload.new) handleRemoteLive(payload.new); })
+      // DELETE: a coach shutting the game down removes the row. No
+      // filter here — under default replica identity a deleted row
+      // only carries its PK, so a game_code filter would never match;
+      // match on the old id instead (see handleLiveDeleted).
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'live_games' },
+        payload => { if (payload && payload.old && payload.old.id) handleLiveDeleted(payload.old.id); })
       .subscribe();
   } catch (e) { /* Realtime unavailable — the app still works in-memory; re-fetch on actions. */ }
 }
@@ -651,11 +662,12 @@ async function startLiveDriver() {
     if (error) throw error;
     SB.liveId = data.id; SB.liveCode = code; SB.liveVersion = 1; SB.role = 'driver'; SB.offline = false;
     subscribeLive();
+    await pushGameUrl(code); // deep link: this game now has its own URL (resolves the view code first)
   } catch (e) {
     SB.backendError = 'Live game could not be started — try again.';
   }
 }
-async function joinLiveGame(code) {
+async function joinLiveGame(code, opts) {
   // Signed-in coach joining by game code. ANY signed-in coach can
   // drive — there is no Take over and no view-only for coaches
   // (Robin's call, Nov 2026): whoever started the game, however many
@@ -679,6 +691,10 @@ async function joinLiveGame(code) {
     else S.screen = 'live';
     S.liveTab = 'actions';
     subscribeLive();
+    // Deep link: the URL now names this game, so a reload re-opens
+    // it. Routing (popstate / first load) passes {push:false} — the
+    // URL is already the destination, so nothing is pushed.
+    if (!opts || opts.push !== false) await pushGameUrl(code);
     render();
     return true;
   } catch (e) {
@@ -733,7 +749,12 @@ function applyViewerAccess(data) {
   // button — same treatment as the coach's active-game note, but
   // view-only. No live game yet: the home shows history only.
   if (SB.authUser && lives.length) {
-    const live = lives[0];
+    // A signed-in coach who opens a viewer link drives straight into
+    // the live game like any coach. If the link names a game, drive
+    // that one — not just the first in the list.
+    let urlGame = '';
+    try { urlGame = (new URLSearchParams(window.location.search).get('game') || '').trim().toUpperCase(); } catch (e) {}
+    const live = (urlGame && lives.find(g => g && g.game_code === urlGame)) || lives[0];
     SB.liveId = live.id; SB.liveCode = live.game_code; SB.liveVersion = live.version;
     SB.role = 'driver';
     applyLiveState(live.state);
@@ -742,6 +763,7 @@ function applyViewerAccess(data) {
     else S.screen = 'live';
     S.liveTab = 'actions';
     subscribeLive();
+    pushGameUrl(live.game_code);
   } else {
     SB.liveId = null; SB.liveCode = null; SB.liveVersion = 0;
     SB.role = SB.authUser ? 'driver' : 'viewer';
@@ -755,16 +777,22 @@ function applyViewerAccess(data) {
 // The snapshot already came through viewer_access — no new server
 // read, and the code is not re-checked here: the list itself is the
 // proof the code was valid. Viewers never get edit controls.
-function joinViewerGame(id) {
+function joinViewerGame(id, opts) {
   const live = (SB.viewerLives || []).find(g => g && g.id === id);
   if (!live) { S.error = 'That live game is no longer available.'; render(); return false; }
   SB.liveId = live.id; SB.liveCode = live.game_code; SB.liveVersion = live.version;
-  SB.role = 'viewer';
+  // Signed-in coaches drive like any coach, even when they arrived
+  // on a viewer link — role 'viewer' would silently stop their
+  // writes syncing (scheduleLiveSync only runs for drivers).
+  SB.role = SB.authUser ? 'driver' : 'viewer';
   applyLiveState(live.state);
   SB.rosterFromLive = true; SB.rosterFromBackend = false;
   if (live.phase === 'halftime') S.screen = 'halftime';
   else S.screen = 'live';
   S.liveTab = 'actions';
+  if (SB.authUser) subscribeLive(); // coaches get Realtime, not the anon poll
+  // Deep link: ?view=CODE&game=CODE — pasting it joins this game.
+  if (!opts || opts.push !== false) pushGameUrl(live.game_code);
   render();
   return true;
 }
@@ -824,9 +852,11 @@ function viewerHtml(){
     ? lives.map(g => {
         const st = (g.state) || {};
         const score = 'US ' + (st.ourScore || 0) + ' \u2013 ' + (st.theirScore || 0) + ' THEM';
-        return '<div class="card"><div class="row spread"><span><strong>There\u2019s a live game in progress</strong>'
-          + ' <span class="muted">' + esc(score) + ' &middot; ' + fmtClock(activeGameElapsed(st)) + '</span></span>'
-          + '<button class="primary" data-join-viewer-game="' + esc(g.id) + '">Join</button></div></div>';
+        // Stacked like the coach's active-game note: the one-line
+        // row squeezed the clock off the screen edge.
+        return '<div class="card"><strong>There\u2019s a live game in progress</strong>'
+          + '<div class="muted">' + esc(score) + ' &middot; ' + fmtClock(activeGameElapsed(st)) + '</div>'
+          + '<div class="row" style="margin-top:8px"><button class="primary grow" data-join-viewer-game="' + esc(g.id) + '">Join</button></div></div>';
       }).join('')
     : '<p class="muted">No live game right now — past games below. When the coach starts a game, it appears here live.</p>';
   return '<section aria-label="Shared view"><h2>Shared view</h2>'
@@ -858,34 +888,59 @@ function viewerShareHtml(){
 async function loadViewerCode(){
   if (!SB.configured || !SB.authUser) return;
   SB.viewerCodeLoading = true;
+  await fetchViewerCode();
+  SB.viewerCodeLoading = false;
+  render();
+}
+/* The DB half of generating a view code: deactivate the old one
+   (one active code at a time), insert a fresh one, return it. The
+   Settings button wraps this with copy + toast; ensureViewerCode
+   (deep links) calls it silently so a coach opening a game always
+   has a shareable URL. */
+async function createViewerCode(){
+  await SB.client.from('viewer_codes').update({ active: false, updated_at: new Date().toISOString() }).eq('active', true);
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const candidate = genGameCode();
+    const { error } = await SB.client.from('viewer_codes').insert({ code: candidate, active: true });
+    if (!error) { SB.viewerCode = candidate; SB.viewerCodeLoaded = true; return candidate; }
+  }
+  throw new Error('no code generated');
+}
+async function generateViewerCode(){
+  if (!SB.configured || !SB.authUser) return;
+  try {
+    const code = await createViewerCode();
+    await copyText(viewerLinkUrl(code));
+    showToast('Link copied');
+    render();
+  } catch (e) { S.error = 'Could not generate a view link — try again.'; render(); }
+}
+/* Quiet load of the active view code (no render): Settings uses
+   loadViewerCode, which renders; deep links just need the value. */
+async function fetchViewerCode(){
+  if (!SB.configured || !SB.authUser) return '';
   try {
     const { data, error } = await SB.client.from('viewer_codes').select('code').eq('active', true).maybeSingle();
     if (error) throw error;
     if (data && data.code) SB.viewerCode = data.code;
     SB.viewerCodeLoaded = true;
   } catch (e) { SB.viewerCodeLoaded = true; }
-  SB.viewerCodeLoading = false;
-  render();
+  return SB.viewerCode || '';
 }
-async function generateViewerCode(){
-  if (!SB.configured || !SB.authUser) return;
-  try {
-    // Deactivate the old code first (one active code at a time),
-    // then insert the new one. A unique-code clash retries with a
-    // fresh code.
-    await SB.client.from('viewer_codes').update({ active: false, updated_at: new Date().toISOString() }).eq('active', true);
-    let code = '';
-    for (let attempt = 0; attempt < 5 && !code; attempt++) {
-      const candidate = genGameCode();
-      const { error } = await SB.client.from('viewer_codes').insert({ code: candidate, active: true });
-      if (!error) code = candidate;
-    }
-    if (!code) throw new Error('no code generated');
-    SB.viewerCode = code; SB.viewerCodeLoaded = true;
-    await copyText(viewerLinkUrl(code));
-    showToast('Link copied');
-    render();
-  } catch (e) { S.error = 'Could not generate a view link — try again.'; render(); }
+/* The code a coach's game URL carries (?view=CODE&game=...). Reuses
+   the team's active code; if none exists yet, generates one on the
+   spot so the URL is always shareable. Never throws — without a
+   code the URL just has no view param (offline / unreachable). */
+async function ensureViewerCode(){
+  if (SB.viewerCode) return SB.viewerCode;
+  if (!SB.configured || !SB.authUser) return '';
+  if (SB.viewerCodeLoading) {
+    for (let i = 0; i < 20 && SB.viewerCodeLoading; i++) await new Promise(r => setTimeout(r, 50));
+    if (SB.viewerCode) return SB.viewerCode;
+  }
+  if (!SB.viewerCodeLoaded) await fetchViewerCode();
+  if (SB.viewerCode) return SB.viewerCode;
+  try { return await createViewerCode(); } catch (e) { return ''; }
 }
 async function copyText(text){
   try {
@@ -939,9 +994,13 @@ function activeGamesHtml(){
   return games.map(g => {
     const st = (g.state) || {};
     const score = 'US ' + (st.ourScore || 0) + ' – ' + (st.theirScore || 0) + ' THEM';
-    return '<div class="card"><div class="row spread"><span><strong>There\u2019s a live game in progress</strong>'
-      + ' <span class="muted">' + esc(score) + ' &middot; ' + fmtClock(activeGameElapsed(st)) + '</span></span>'
-      + '<button class="primary" data-join-active="' + esc(g.id) + '">Join</button></div></div>';
+    // Stacked, not one flex row: the single-line layout squeezed the
+    // clock off the right edge ("US 1 – 0 THEM · 20…"). Title on its
+    // own line, score + clock on the next, Join below — nothing can
+    // overflow, at 360px or 390px.
+    return '<div class="card"><strong>There\u2019s a live game in progress</strong>'
+      + '<div class="muted">' + esc(score) + ' &middot; ' + fmtClock(activeGameElapsed(st)) + '</div>'
+      + '<div class="row" style="margin-top:8px"><button class="primary grow" data-join-active="' + esc(g.id) + '">Join</button></div></div>';
   }).join('');
 }
 async function joinActiveGame(row){
@@ -955,8 +1014,97 @@ async function joinActiveGame(row){
   else S.screen = 'live';
   S.liveTab = 'actions';
   subscribeLive();
+  await pushGameUrl(row.game_code); // deep link, same as joining by code (resolves the view code first)
   render();
   return true;
+}
+/* ---------- Deep links: every live game has its own URL ---------- */
+/* Coach: ?game=HEQK. Viewer: ?view=CODE&game=HEQK. Opening a game
+   pushes its URL; reloading it re-opens the same game; going back
+   to setup clears it (plain URL, or ?view=CODE for a viewer). The
+   browser back button works: opening a game pushes a history entry,
+   going back returns to the previous screen (routeFromUrl, driven by
+   popstate). URL changes never re-render and never touch game state.
+   pushState/replaceState are guarded — a sandboxed or file:// page
+   that forbids them still plays fine, just without deep links. */
+function gameUrl(code){
+  const p = new URLSearchParams();
+  // The coach URL always carries the view code (?view=CODE&game=...),
+  // so the address bar is already a shareable link: anyone opening
+  // it without signing in lands in that game as a viewer, and a
+  // signed-in coach gets full edit rights. Edit rights come from
+  // sign-in only — the view code in the URL never grants them.
+  // Viewers carry the code they joined with.
+  const view = SB.viewerCode || (SB.viewerMode && SB.viewerJoinedCode) || '';
+  if (view) p.set('view', view);
+  p.set('game', code);
+  return window.location.pathname + '?' + p.toString();
+}
+function homeUrl(){
+  if (SB.viewerMode && SB.viewerJoinedCode) return window.location.pathname + '?view=' + SB.viewerJoinedCode;
+  return window.location.pathname;
+}
+function pushUrl(url){ try { if (window.location.pathname + window.location.search !== url) window.history.pushState({}, '', url); } catch (e) {} }
+function replaceUrl(url){ try { window.history.replaceState({}, '', url); } catch (e) {} }
+async function pushGameUrl(code){
+  // Coaches: make sure a view code exists first, so the URL is
+  // shareable from the moment the game opens.
+  if (SB.authUser) await ensureViewerCode();
+  pushUrl(gameUrl(code));
+}
+/* Back out of a live game without pushing a new history entry (used
+   by routing: the URL already says where we are going). Viewers
+   leave the shared view; coaches go to setup keeping history,
+   roster, settings and team name. */
+function leaveToHome(){
+  if (SB.viewerMode && !SB.authUser) leaveLiveGame();
+  else startNewGame();
+  replaceUrl(homeUrl());
+}
+/* Route the current URL: ?game= (coach) or ?view=&game= (viewer)
+   opens that game directly; no game param while in a live game
+   means the back button was used — leave the game. Returns true
+   when it handled the URL (joined a game, showed the not-found
+   message, or left a game); false when nothing applied, so the
+   caller carries on with the normal entry flow. Never pushes
+   history — the URL is already the destination. */
+async function routeFromUrl(){
+  let params;
+  try { params = new URLSearchParams(window.location.search); } catch (e) { return false; }
+  const gameCode = (params.get('game') || '').trim().toUpperCase();
+  const viewCode = (params.get('view') || '').trim().toUpperCase();
+  if (gameCode) {
+    if (SB.liveCode === gameCode && SB.liveId) {
+      if (SB.viewerMode && SB.authUser) { SB.role = 'driver'; startViewerPoll(); }
+      return true; // already in that game
+    }
+    if (SB.viewerMode && SB.viewerJoinedCode) {
+      const live = (SB.viewerLives || []).find(g => g && g.game_code === gameCode);
+      if (live) { joinViewerGame(live.id, {push:false}); return true; }
+      // Named game is gone or never existed — plain in-app message
+      // on the viewer home, never a blank screen.
+      S.error = 'That live game is no longer available.';
+      S.screen = 'viewer'; render(); return true;
+    }
+    if (SB.authUser) {
+      // Signed-in coach: full edit rights, no code entry, no setup
+      // detour. A missing game shows joinLiveGame's not-found error
+      // on setup — the way back is right there.
+      return await joinLiveGame(gameCode, {push:false});
+    }
+    if (viewCode && SB.configured) {
+      // Viewer link with a game, not joined yet (e.g. back-button
+      // into a viewer URL): join the view first, then the game.
+      const ok = await joinViewerCode(viewCode);
+      if (!ok) return true; // joinViewerCode shows the error
+      return await routeFromUrl();
+    }
+    return false; // needs sign-in first; enterApp routes after sign-in
+  }
+  if (SB.liveId && (S.screen === 'live' || S.screen === 'halftime')) {
+    leaveToHome(); return true;
+  }
+  return false;
 }
 function scheduleLiveSync(immediate) {
   if (SB.role !== 'driver' || !SB.liveId || !SB.configured) return;
@@ -979,7 +1127,18 @@ async function doLiveSync() {
       // last write wins, no banner, no user action — so this
       // session's change still lands instead of being dropped.
       const latest = await fetchLiveRow();
-      if (!latest) { SB.offline = true; render(); return; }
+      if (!latest) {
+        // No row: fetchLiveRow does not distinguish "gone" from
+        // "unreachable", so check explicitly. If the row is gone,
+        // another coach shut the game down — leave it like they did
+        // instead of sitting offline in a dead game. A failed check
+        // is just a network problem: stay offline and retry later.
+        try {
+          const { data: stillThere, error: checkErr } = await SB.client.from('live_games').select('id').eq('id', SB.liveId).maybeSingle();
+          if (!checkErr && !stillThere) { handleLiveDeleted(SB.liveId); return; }
+        } catch (e) { /* fall through to offline below */ }
+        SB.offline = true; render(); return;
+      }
       if (latest.version > SB.liveVersion) {
         const retry = await SB.client.from('live_games').update({
           state: buildLiveState(), phase: livePhase(), version: latest.version + 1,
@@ -1014,6 +1173,47 @@ async function finishLiveGame() {
   } catch (e) { /* History insert is the durable record; live row may stay 'live'. */ }
   unsubscribeLive();
   SB.liveId = null; SB.liveCode = null; SB.role = null;
+}
+/* Shut down a live game (signed-in coach only): delete the live_games
+   row and drop the local game — it is NOT saved to history. Different
+   from End game, which finishes and saves. For a stale test game or
+   an abandoned game. Anonymous viewers never see the control and the
+   DELETE policy (schema.sql / add-live-delete.sql) is authenticated-
+   only, so a viewer cannot call it either. */
+async function shutdownLiveGame(){
+  if (!SB.authUser) return;
+  const liveId = SB.liveId;
+  if (liveId && SB.configured) {
+    unsubscribeLive(); // do not hear our own DELETE echo
+    try {
+      const { error } = await SB.client.from('live_games').delete().eq('id', liveId);
+      if (error) throw error;
+    } catch (e) {
+      subscribeLive(); // back on the game — the shutdown did not go through
+      S.error = 'Could not shut down the live game — check connection and try again.';
+      render(); return;
+    }
+  }
+  // Back to setup, keeping history, roster, settings and team name —
+  // same as starting a new game, but nothing was saved.
+  startNewGame();
+  replaceUrl(homeUrl()); // the shut-down game's URL is stale
+  showToast('Live game shut down');
+}
+/* Another coach shut the game down (or the row was deleted some other
+   way): the game is gone. If we were in that game, go back to setup
+   like the coach who shut it down — with the small "Updated" note,
+   not an error. If we were only listing it on setup, drop it from
+   the active-game note. */
+function handleLiveDeleted(deletedId){
+  if (SB.liveId && deletedId === SB.liveId) {
+    startNewGame();
+    replaceUrl(homeUrl()); // the deleted game's URL is stale
+    showToast('Updated');
+  } else if (deletedId) {
+    SB.activeGames = (SB.activeGames || []).filter(g => g && g.id !== deletedId);
+    if (S.screen === 'setup') render();
+  }
 }
 /* Live-update toast: a small "Updated" pill fixed near the top of the
    screen. It lives on document.body (outside mainEl, so re-renders
@@ -1267,7 +1467,7 @@ function fieldHtml(opts){
   // as an absolute overlay — zero vertical space on the page, nothing
   // shifts when they appear. The GK chip is centred, so the corner of
   // the goal box is empty.
-  const swapOverlay=opts.swapOverlay?'<div class="field-swap"><button class="primary" data-do-swap>Swap</button><button class="ghost" data-cancel-swap>Cancel swap</button></div>':'';
+  const swapOverlay=opts.swapOverlay?'<div class="field-swap"><button class="primary" data-do-swap>Swap</button></div>':'';
   return '<div class="field" role="group" aria-label="Field, 1-2-3-1">'
     + row([6])
     + row([3,4,5])
@@ -1794,11 +1994,27 @@ function setupHtml(){
     +body
     +'</section>';
 }
+/* Required field spots for starting: every position except ones
+   removed by Play short (6v7). A 7v7 game needs all 7 filled; a
+   short game needs its 6 remaining spots. A game must never start
+   with an empty spot — the coach fills it, the app never auto-fills. */
+function emptySpots(){
+  const removed = new Set(S.removedPositions || []);
+  return POSITIONS.map((p, i) => i).filter(i => !removed.has(i) && (S.lineup || [])[i] == null);
+}
+function emptySpotsLabel(){
+  const names = emptySpots().map(i => POSITIONS[i]);
+  if (!names.length) return '';
+  if (names.length === 1) return names[0];
+  return names.slice(0, -1).join(', ') + ' and ' + names[names.length - 1];
+}
 function reviewHtml(){
+  const empty = emptySpotsLabel();
   return '<section aria-label="Kickoff review"><h2>Kickoff review</h2><p class="muted">Check the field and bench, then start the clock.</p>'
+    +(empty?'<p class="error" role="alert">Fill '+esc(empty)+' to start. Go back to setup and tap an empty spot to choose a player.</p>':'')
     +'<div class="field-wrap">'+fieldHtml({readonly:true})+'</div>'
     +'<h3>Bench</h3>'+benchHtml()
-    +'<div class="row"><button class="primary grow" data-start-game>Start game</button><button data-back-setup>Back to setup</button></div></section>';
+    +'<div class="row"><button class="primary grow" data-start-game'+(empty?' disabled':'')+'>Start game</button><button data-back-setup>Back to setup</button></div></section>';
 }
 function liveHtml(){
   // Viewers (signed-in coaches and anonymous code-joined watchers
@@ -1848,17 +2064,26 @@ function liveHtml(){
     body='<h2>Team — player status</h2><p class="muted">Alphabetical. Notes are private.</p>'+teamRowsHtml()
       +'<h3>Starting lineup (read-only)</h3><div class="field-wrap" style="position:static">'+fieldHtml({readonly:true})+'</div>';
   }
+  // Top row: only the contextual Undo and the coach-only Shut down
+  // link. Halftime / End game moved to large buttons at the bottom
+  // of the live screen (Robin's call, Nov 2026 — the small text
+  // links under the scoreboard were too small to tap). The row
+  // renders only when it has something in it, so it never leaves a gap.
+  const topLinks = [];
+  if (SB.authUser) topLinks.push('<button class="linklike danger-link" data-shutdown>Shut down game</button>');
+  if (S.undoStack.length) topLinks.push('<button class="linklike" data-undo>Undo '+esc(S.undoStack[S.undoStack.length-1].label)+'</button>');
+  const gameActions = topLinks.length ? '<div class="game-actions">'+topLinks.join('<span aria-hidden="true">&middot;</span>')+'</div>' : '';
   return '<section aria-label="Live game">'
     +'<div class="scoreboard"><div class="score-row">'
     +'<div class="side"><button data-score="us-minus" aria-label="US minus">−</button><div class="score-col"><span class="team-label">US</span><span class="score-num">'+S.ourScore+'</span></div><button data-score="us-plus" aria-label="US plus">+</button></div>'
     +'<div class="clock-mid"><div class="clock" id="clock">'+fmtClock(S.elapsed)+'</div><div class="clock-controls"><button class="pill" data-plus2>+2:00</button><button class="pill pause" data-pause>'+(S.running?'\u275a\u275a PAUSE':'RESUME')+'</button></div></div>'
     +'<div class="side"><button data-score="them-minus" aria-label="Them minus">−</button><div class="score-col"><span class="team-label">THEM</span><span class="score-num">'+S.theirScore+'</span></div><button data-score="them-plus" aria-label="Them plus">+</button></div>'
     +'</div></div>'
-    +'<div class="game-actions"><button class="linklike" data-halftime>Halftime</button><span aria-hidden="true">&middot;</span><button class="linklike" data-end>End game</button>'
-    +(S.undoStack.length?'<span aria-hidden="true">&middot;</span><button class="linklike" data-undo>Undo '+esc(S.undoStack[S.undoStack.length-1].label)+'</button>':'')
-    +'</div>'
+    +gameActions
     +'<div class="tabs" role="tablist">'+tabs.map(([k,label])=>'<button role="tab" aria-selected="'+(S.liveTab===k)+'" data-tab="'+k+'">'+label+'</button>').join('')+'</div>'
     +body
+    // Game flow, bottom of the screen: proper large tap targets.
+    +'<div class="row" style="margin-top:12px"><button class="primary grow" data-halftime>Halftime</button><button class="grow" data-end>End game</button></div>'
     +(SB.role==='driver'&&SB.liveId?'<p class="muted small" style="text-align:center">Game code <strong>'+esc(SB.liveCode)+'</strong> — the other coach enters this code on setup to join.</p>':'')
     +'</section>';
 }
@@ -1946,6 +2171,7 @@ async function finishGame(){
   S.lastLineup=[...(S.startingLineup||S.lineup)];
   S.screen='finished';
   render();
+  replaceUrl(homeUrl()); // the game is over — its ?game= URL is stale
   // Durable record first: history insert, then mark the live row finished.
   await saveHistoryGame(game);
   await finishLiveGame();
@@ -2010,7 +2236,7 @@ function startSecondHalf(){
 
 /* ---------- Events (delegation) ---------- */
 document.addEventListener('click', async (e)=>{
-  const t=e.target.closest('[data-spot],[data-bench],[data-tab],[data-pick],[data-scorer],[data-step],[data-close],[data-clear-spot],[data-save-note],[data-pref],[data-remove-pos],[data-goal-minus],[data-goal-plus],[data-goal-del],[data-tired],[data-note],[data-prefs],[data-rename],[data-save-rename],[data-add-player],[data-save-add-player],[data-remove-player],[data-save-roster],[data-attend],[data-unqueue],[data-csv],[data-editgoals],[data-auto],[data-refresh],[data-review],[data-back-setup],[data-start-game],[data-pause],[data-plus2],[data-halftime],[data-end],[data-undo],[data-apply],[data-clear-queue],[data-suggest],[data-edit-lineup],[data-play-short],[data-full-strength],[data-edit-goals],[data-do-swap],[data-cancel-swap],[data-plan-refresh],[data-plan-use],[data-start-second],[data-snap-clock],[data-back-live],[data-goto-signin],[data-join-viewer],[data-join-viewer-game],[data-share-viewer],[data-join-active],[data-gen-viewer-link],[data-copy-viewer-link],[data-leave-live],[data-new-game],[data-csv-last],[data-editgoals-last],[data-confirm-yes],[data-last-lineup],[data-use-preferred],[data-save-preferred],[data-score],[data-signin],[data-signout],[data-close-history],[data-discard-game],[data-leaving],[data-arrived],[data-setup-tab],[data-details],[data-season-csv],[data-all-history-csv],[data-export-roster],[data-clear-lineup],[data-clear-preferred],[data-manage-preferred],[data-more],[data-pref-inline],[data-halftime-prefs],[data-join-live]');
+  const t=e.target.closest('[data-spot],[data-bench],[data-tab],[data-pick],[data-scorer],[data-step],[data-close],[data-clear-spot],[data-save-note],[data-pref],[data-remove-pos],[data-goal-minus],[data-goal-plus],[data-goal-del],[data-tired],[data-note],[data-prefs],[data-rename],[data-save-rename],[data-add-player],[data-save-add-player],[data-remove-player],[data-save-roster],[data-attend],[data-unqueue],[data-csv],[data-editgoals],[data-auto],[data-refresh],[data-review],[data-back-setup],[data-start-game],[data-pause],[data-plus2],[data-halftime],[data-end],[data-shutdown],[data-undo],[data-apply],[data-clear-queue],[data-suggest],[data-edit-lineup],[data-play-short],[data-full-strength],[data-edit-goals],[data-do-swap],[data-plan-refresh],[data-plan-use],[data-start-second],[data-snap-clock],[data-back-live],[data-goto-signin],[data-join-viewer],[data-join-viewer-game],[data-share-viewer],[data-join-active],[data-gen-viewer-link],[data-copy-viewer-link],[data-leave-live],[data-new-game],[data-csv-last],[data-editgoals-last],[data-confirm-yes],[data-last-lineup],[data-use-preferred],[data-save-preferred],[data-score],[data-signin],[data-signout],[data-close-history],[data-discard-game],[data-leaving],[data-arrived],[data-setup-tab],[data-details],[data-season-csv],[data-all-history-csv],[data-export-roster],[data-clear-lineup],[data-clear-preferred],[data-manage-preferred],[data-more],[data-pref-inline],[data-halftime-prefs],[data-join-live]');
   if(!t) return;
   const d=t.dataset;
 
@@ -2043,12 +2269,17 @@ document.addEventListener('click', async (e)=>{
     }
   }
   if(d.gotoSignin!==undefined){ S.showSignin=true; render(); return; }
-  if(d.leaveLive!==undefined){ leaveLiveGame(); return; }
-  // Share onward: copies the SAME viewer link (same code) the
-  // viewer arrived on. No new code, nothing revoked — viewers
-  // cannot generate or revoke codes.
+  if(d.leaveLive!==undefined){ const home = homeUrl(); leaveLiveGame(); pushUrl(home); return; }
+  // Share onward: copies the URL in the address bar — the deep link
+  // for the game open right now (?view=CODE&game=...), or ?view=CODE
+  // on the viewer home. Same shape as the coach's URL, so pasting it
+  // into a text lands the next person in the same game as a viewer.
+  // No new code, nothing revoked — viewers cannot generate or revoke codes.
   if(d.shareViewer!==undefined){
-    if (SB.viewerJoinedCode) { await copyText(viewerLinkUrl(SB.viewerJoinedCode)); showToast('Link copied'); }
+    let url = '';
+    try { url = window.location.href; } catch (e) {}
+    if (url) { await copyText(url); showToast('Link copied'); }
+    else if (SB.viewerJoinedCode) { await copyText(viewerLinkUrl(SB.viewerJoinedCode)); showToast('Link copied'); }
     return;
   }
   if(d.joinViewerGame!==undefined){ joinViewerGame(d.joinViewerGame); return; }
@@ -2189,11 +2420,12 @@ document.addEventListener('click', async (e)=>{
   if(d.apply!==undefined){ applyQueue(); return; }
   if(d.suggest!==undefined){ suggestRotation(); return; }
   if(d.doSwap!==undefined){ doSwap(); return; }
-  if(d.cancelSwap!==undefined){ S.swapPair=[]; S.selection=null; render(); return; }
   if(d.auto!==undefined){ S.lineup=autoLineup(false); S.removedPositions=[]; S.shortMode=false; render(); return; }
   if(d.refresh!==undefined){ S.lineup=autoLineup(false); S.removedPositions=[]; S.shortMode=false; render(); return; }
   if(d.review!==undefined){
-    if(S.lineup.some(x=>x==null)){ S.error='Fill all 7 spots before starting — tap an empty spot to choose a player.'; render(); return; }
+    // Kickoff review is reachable with holes — the review screen
+    // itself names the empty spots and blocks Start game until they
+    // are filled, so the coach can see exactly what is missing.
     S.screen='review'; render(); return;
   }
   if(d.backSetup!==undefined){
@@ -2203,7 +2435,7 @@ document.addEventListener('click', async (e)=>{
     if (SB.viewerMode && !SB.authUser) { leaveLiveGame(); return; }
     S.screen='setup'; S.editingLive=false; render(); return;
   }
-  if(d.closeHistory!==undefined){ closeFinishedGame(); return; }
+  if(d.closeHistory!==undefined){ const home = homeUrl(); closeFinishedGame(); pushUrl(home); return; }
   if(d.discardGame!==undefined){ discardFinishedGame(); return; }
   if(d.leaving!==undefined){
     const i=+d.leaving; closeModal(); pushUndo('player leaving');
@@ -2218,6 +2450,10 @@ document.addEventListener('click', async (e)=>{
     render(); return;
   }
   if(d.startGame!==undefined){
+    // Guard (the review screen also disables the button): a game
+    // never starts with an empty required spot.
+    const empty = emptySpotsLabel();
+    if (empty) { S.error='Fill '+empty+' to start.'; S.screen='review'; render(); return; }
     S.screen='live'; S.liveTab='actions'; S.elapsed=0; S.running=true;
     S.minutesSec=Array(S.roster.length).fill(0); S.gkSec=Array(S.roster.length).fill(0);
     S.posSec=Array.from({length:S.roster.length},()=>({})); S.goals=[]; S.queue=[]; S.ourScore=0; S.theirScore=0;
@@ -2238,6 +2474,13 @@ document.addEventListener('click', async (e)=>{
   if(d.halftime!==undefined){ S.running=false; S.plannedLineup=null; S.screen='halftime'; render(); return; }
   if(d.end!==undefined){
     openConfirm({title:'End the game?', body:'The finished summary and CSV will be saved to this session’s history.', confirmLabel:'End game', onConfirm:()=>{ finishGame(); }});
+    return;
+  }
+  if(d.shutdown!==undefined){
+    // Coach-only: the button is not rendered for anonymous viewers,
+    // and the viewer edit gate above blocks the action too — but the
+    // handler also checks: shutdownLiveGame() returns unless signed in.
+    openConfirm({title:'Shut down this game?', body:'The live game will be discarded and not saved to history. Finished games in history, the roster, and settings are kept.', confirmLabel:'Shut down game', danger:true, onConfirm:()=>{ shutdownLiveGame(); }});
     return;
   }
   if(d.undo!==undefined){ undoLast(); return; }
@@ -2266,7 +2509,7 @@ document.addEventListener('click', async (e)=>{
     S.elapsed=S.settings.matchMinutes*30; render(); return;
   }
   if(d.backLive!==undefined){ S.editingLive=false; S.screen='live'; render(); return; }
-  if(d.newGame!==undefined){ startNewGame(); return; }
+  if(d.newGame!==undefined){ startNewGame(); pushUrl(homeUrl()); return; }
   if(d.csvLast!==undefined){
     const last=S.history[S.history.length-1]; if(last) downloadCsv('sub-manager-game.csv', csvForGame(last)); return;
   }
@@ -2474,6 +2717,12 @@ async function enterApp(){
     if (SB.viewerMode && SB.authUser) { SB.role = 'driver'; startViewerPoll(); }
     render(); return;
   }
+  // Deep link: a coach opening ?game= (or ?view=CODE&game=) lands in
+  // that game directly — on first load and after signing in.
+  if (SB.configured) {
+    const routed = await routeFromUrl();
+    if (routed) return;
+  }
   if (SB.configured && SB.authUser) await loadRoster();
   if (SB.configured) await loadHistory();
   render();
@@ -2494,7 +2743,7 @@ async function enterApp(){
   try { viewCode = new URLSearchParams(window.location.search).get('view'); } catch (e) { viewCode = null; }
   if (viewCode && SB.configured) {
     const ok = await joinViewerCode(viewCode);
-    if (ok) { /* joined — the viewer screen is up; nothing more to do */ }
+    if (ok) { await routeFromUrl(); /* ?view=CODE&game=... lands in that game */ }
     else if (authGated()) { /* stay on the entry screen with the error */ }
     else { await enterApp(); }
     // fall through to the listeners below
@@ -2503,6 +2752,9 @@ async function enterApp(){
   } else {
     await enterApp();
   }
+  // Back / forward buttons: the URL is the game — route it, so
+  // going back leaves the game and going forward re-opens it.
+  window.addEventListener('popstate', () => { routeFromUrl(); });
   // Offline / reconnect: keep working in-memory, sync when back.
   window.addEventListener('offline', () => { SB.online = false; SB.offline = true; render(); });
   window.addEventListener('online', async () => {

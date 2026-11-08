@@ -143,14 +143,15 @@ create index if not exists live_games_game_code_idx
 alter table public.live_games enable row level security;
 
 -- Live game: login-required, same as history. Only signed-in coaches
--- can read, start, or update a live game. The anon role gets nothing
--- on this table. Anonymous viewing goes through the SECURITY DEFINER
--- function viewer_access() (see the viewer-access section at the end
--- of this file), never through direct table reads. The driver /
--- view-only split is enforced in the app (the view-only phone never
--- issues writes; Take over makes it the driver) — RLS is the gate
--- that keeps anyone without a coach login out entirely. No deletes
--- through the app for any role.
+-- can read, start, update, or shut down a live game. The anon role
+-- gets nothing on this table. Anonymous viewing goes through the
+-- SECURITY DEFINER function viewer_access() (see the viewer-access
+-- section at the end of this file), never through direct table reads.
+-- The driver / view-only split is enforced in the app (the view-only
+-- phone never issues writes; Take over makes it the driver) — RLS is
+-- the gate that keeps anyone without a coach login out entirely.
+-- Deletes are coach-only: Shut down game removes a live row without
+-- saving history (different from End game, which finishes and saves).
 create policy "Live game is readable by signed-in coaches"
   on public.live_games for select
   to authenticated
@@ -166,6 +167,11 @@ create policy "Signed-in coaches can update a live game"
   to authenticated
   using (true)
   with check (true);
+
+create policy "Signed-in coaches can shut down a live game"
+  on public.live_games for delete
+  to authenticated
+  using (true);
 
 -- Realtime: both phones subscribe to changes on live_games so a sub
 -- applied on one phone appears on the other without a texted link.
@@ -203,9 +209,11 @@ create table if not exists public.team_roster (
 alter table public.team_roster enable row level security;
 
 -- Roster stays login-required on every operation: only signed-in
--- coaches can read or save it. The anon role gets nothing here —
--- unlike live_games and game_history, which anyone can read
--- (view-only). No deletes through the app for any role.
+-- coaches can read or save it. The anon role gets nothing here.
+-- There is no delete policy on this table — the roster is never
+-- deleted through the app. (Deletes exist on the other tables:
+-- authenticated-only, for discarding a saved game and for shutting
+-- down a live game.)
 create policy "Team roster is readable by signed-in coaches"
   on public.team_roster for select
   to authenticated
