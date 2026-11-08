@@ -1,16 +1,20 @@
 # History import — private app's 10 past games → Supabase `game_history`
 
-Status: **not yet run.** No historical rows have been inserted; the
-portable Supabase history is currently empty (no games finished through
-the portable app yet). The real season history (10 games: two on Nov 7,
-then Oct 31, Oct 24, Oct 17, Oct 10, etc.) lives in the private app.
+Status: **dry-run done, SQL ready, not yet run.** The private app's
+all-history export (10 games: Sep 19–Nov 7, 2026) was parsed and
+`import.sql` generated in the import folder; totals verified against
+the export's own Season totals section. No historical rows have been
+inserted yet — Robin runs `import.sql` in the Supabase SQL Editor.
+The private app now has the same **Export all history** and
+**Export roster** buttons as this app, so its export is the migration
+source.
 
 ## Why a CSV import (not a direct read)
 
 The private artifact's saved server state is not readable by the agent
 (`getstate` returns `authorized: false`), so there is no direct
-extraction path. The private app's per-game CSV exports are the only
-verified source.
+extraction path. The private app's all-history export is the verified
+source.
 
 ## What lives where
 

@@ -379,9 +379,16 @@ function backendPlayersFromGame(h) {
   }));
 }
 function backendGoalsFromGame(h) {
+  // Scorer is stored by NAME as well as index, so a saved game never
+  // depends on roster order: the name is what the History screen
+  // resolves against on load. The index is into the game's own
+  // players list (h.players), not the current roster. player null =
+  // unknown scorer (recorded, attributed to nobody).
   return (h.goals || []).map(g => ({
-    player_index: g.player,
-    player_name: g.player === -1 ? 'Own goal' : (S.roster[g.player] ? S.roster[g.player].name : '?'),
+    player_index: g.player == null ? null : g.player,
+    player_name: g.player === -1 ? 'Own goal'
+      : g.player == null ? null
+      : (g.player_name || ((h.players || [])[g.player] ? h.players[g.player].name : (S.roster[g.player] ? S.roster[g.player].name : null))),
     seconds: g.seconds == null ? null : g.seconds,
     side: g.side || 'us',
   }));
@@ -395,9 +402,24 @@ function internalGameFromRow(row) {
     posSeconds: Object.fromEntries(
       Object.entries(p.minutes_by_position || {}).map(([k, v]) => [k, v * 60])),
   }));
-  const goals = (row.goals || []).map(g => ({
-    player: g.player_index, seconds: g.seconds == null ? null : g.seconds, side: g.side || 'us',
-  }));
+  // Scorer resolution is NAME-first, never roster-order dependent:
+  // a stored player_name is matched against the game's own players
+  // list; player_index is only a fallback for old rows with no name.
+  // player null = unknown scorer (recorded, attributed to nobody).
+  const goals = (row.goals || []).map(g => {
+    let player = null;
+    let name = (g.player_name && g.player_name !== 'Own goal') ? g.player_name : null;
+    if (g.player_index === -1) { player = -1; name = 'Own goal'; }
+    else if (name) {
+      const idx = (row.players || []).findIndex(p => p.name === name);
+      if (idx !== -1) player = idx;
+    }
+    if (player == null && typeof g.player_index === 'number' && g.player_index >= 0 && (row.players || [])[g.player_index]) {
+      player = g.player_index;
+      if (!name) name = row.players[g.player_index].name;
+    }
+    return { player, player_name: name, seconds: g.seconds == null ? null : g.seconds, side: g.side || 'us' };
+  });
   let date = '';
   try { date = row.game_date ? new Date(row.game_date + 'T12:00:00').toLocaleDateString() : new Date(row.created_at).toLocaleDateString(); } catch (e) { date = row.game_date || ''; }
   return {
@@ -759,8 +781,18 @@ function flagFor(i){
 function goalsFor(i, side){
   return S.goals.filter(g=>g.player===i && (!side || g.side===side)).length;
 }
-function goalLabel(g){
-  const name=g.player===-1?'Own goal':S.roster[g.player]?S.roster[g.player].name:'?';
+// Goal label. players is the list the goal's index refers to — the
+// game's own players for a history game, the current roster for a
+// live game. The stored player_name wins over the index, so a goal
+// never shows the wrong player when the roster is reordered.
+// player null = unknown scorer.
+function goalLabel(g, players){
+  const list = players || S.roster;
+  let name;
+  if (g.player === -1) name = 'Own goal';
+  else if (g.player == null) name = g.player_name || 'Unknown scorer';
+  else if (g.player_name) name = g.player_name;
+  else name = list[g.player] ? list[g.player].name : '?';
   const min=g.seconds==null?'':" "+Math.floor(g.seconds/60)+"'";
   return name+min;
 }
@@ -1010,7 +1042,7 @@ function historyHtml(){
       + '<div class="muted">' + (played ? played + ' &middot; ' : '') + 'US ' + h.ourScore + ' \u2013 ' + h.theirScore + ' THEM</div></div>'
       + '<button class="small" data-details="' + hi + '">' + (open ? 'Hide' : 'Details') + '</button></div>';
     if (!open) return '<div class="card">' + head + '</div>';
-    const goalLines = (h.goals || []).map(goalLabel).join(', ') || 'No goals recorded';
+    const goalLines = (h.goals || []).map(g=>goalLabel(g, h.players)).join(', ') || 'No goals recorded';
     const rows = h.players.map(p => {
       // Per-player row: counted total (whole minutes) on the right,
       // per-position breakdown below the name — goalie minutes included
@@ -1044,7 +1076,7 @@ function isoDateOf(h){
 // stays right even if the roster has changed since; -1 is an own goal.
 function goalRowsForCsv(h){
   return (h.goals||[]).map(g=>[
-    g.player===-1?'Own goal':((h.players||[])[g.player]?h.players[g.player].name:'?'),
+    g.player===-1?'Own goal':(g.player==null?'Unknown scorer':(g.player_name||((h.players||[])[g.player]?h.players[g.player].name:'?'))),
     g.seconds==null?'':Math.floor(g.seconds/60),
     g.side||'us']);
 }
@@ -1230,7 +1262,9 @@ function openShortChooser(){
 function openEditGoalsLive(){
   if(!S.goals.length){ openModal('<h2>Edit goals</h2><p>No goals recorded yet in this game.</p><div class="pin-bottom"><button class="ghost" data-close>Close</button></div>'); return; }
   const rows=S.goals.map((g,gi)=>'<div class="mrow"><span class="name">'+esc(goalLabel(g))+' ('+(g.side==='us'?'US':'THEM')+')</span>'
-    +'<span class="nums"><button class="small" data-goal-minus="'+gi+'">−1′</button> <button class="small" data-goal-plus="'+gi+'">+1′</button> '
+    +'<span class="nums">'
+    +(g.player==null?'<button class="small" data-assign-live="'+gi+'">Assign…</button> ':'')
+    +'<button class="small" data-goal-minus="'+gi+'">−1′</button> <button class="small" data-goal-plus="'+gi+'">+1′</button> '
     +'<button class="small danger" data-goal-del="'+gi+'">Remove</button></span></div>').join('');
   openModal('<h2>Edit goals — live game</h2>'+rows+'<div class="pin-bottom"><button class="ghost" data-close>Done</button></div>');
 }
@@ -1423,7 +1457,7 @@ function finishedHtml(){
   return '<section aria-label="Finished game"><h2>Full time — US '+last.ourScore+' – '+last.theirScore+' THEM</h2>'
     +(S.saveNote?'<p class="muted">'+esc(S.saveNote)+'</p>':'')
     +'<div class="field-wrap" style="position:static">'+field+'</div>'
-    +'<p>'+(last.goals.length?'Scorers: '+last.goals.map(goalLabel).join(', '):'No goals recorded.')+'</p>'
+    +'<p>'+(last.goals.length?'Scorers: '+last.goals.map(g=>goalLabel(g, last.players)).join(', '):'No goals recorded.')+'</p>'
     +'<div class="row"><button class="primary" data-close-history>Close and view history</button><button data-csv-last>Download CSV</button><button data-editgoals-last>Edit goals</button></div>'
     +'<div class="row"><button data-new-game>Start new game</button><button class="danger" data-discard-game>Discard this game</button></div>'
     +'<h3>Minutes</h3>'+last.players.map(p=>'<div class="mrow"><span class="name">'+esc(p.name)+'</span><span class="nums">'+fmtMin(p.seconds)+' min'+(p.gkSeconds?' (GK '+fmtMin(p.gkSeconds)+')':'')+(p.goals?' ⚽ '+p.goals:'')+'</span></div>').join('')
@@ -1456,8 +1490,10 @@ function doSwap(){
 }
 function recordGoal(side, player){
   pushUndo('goal');
-  const seconds=player==='skip'?null:scorerMinute*60;
-  if(player!=='skip') S.goals.push({player, seconds, side});
+  // "Skip · no scorer" still records the goal — as an unknown scorer
+  // with the current minute — so the goal list always matches the
+  // score. It is attributed to nobody until someone assigns it.
+  S.goals.push({player: player==='skip'?null:player, seconds: scorerMinute*60, side});
   if(side==='us') S.ourScore+=1; else S.theirScore+=1;
   closeModal(); render();
 }
@@ -1773,7 +1809,9 @@ document.addEventListener('click', async (e)=>{
     const h=S.history[+d.editgoals];
     openModal('<h2>Edit goals — past game</h2><p class="muted">Backfill a scorer with an optional minute, or remove one.</p>'
       +'<div class="row"><button data-backfill="'+d.editgoals+'">Add goal…</button></div>'
-      +(h.goals.map((g,gi)=>'<div class="mrow"><span class="name">'+esc(goalLabel(g))+'</span><button class="small danger" data-delhist="'+d.editgoals+':'+gi+'">Remove</button></div>').join('')||'<p class="muted">No goals yet.</p>')
+      +(h.goals.map((g,gi)=>'<div class="mrow"><span class="name">'+esc(goalLabel(g, h.players))+'</span>'
+        +(g.player==null?'<button class="small" data-assign-hist="'+d.editgoals+':'+gi+'">Assign…</button>':'')
+        +'<button class="small danger" data-delhist="'+d.editgoals+':'+gi+'">Remove</button></div>').join('')||'<p class="muted">No goals yet.</p>')
       +'<div class="pin-bottom"><button class="ghost" data-close>Done</button></div>');
     return;
   }
@@ -1813,6 +1851,51 @@ document.addEventListener('click', async (e)=>{
       if(idx!==undefined) S.goals.splice(idx,1);
       S.theirScore=Math.max(0,S.theirScore-1); render(); return;
     }
+  }
+});
+/* Assign a scorer to an unknown-scorer goal (live game or past game).
+   The goal keeps its side and minute; only the scorer changes. */
+document.addEventListener('click',(e)=>{
+  const t=e.target.closest('[data-assign-live],[data-assign-hist]');
+  if(!t) return;
+  if(t.dataset.assignLive!==undefined){
+    const gi=+t.dataset.assignLive;
+    const rows=S.roster.map((r,i)=>'<button data-assign-live-pick="'+gi+':'+i+'">'+esc(r.name)+'</button>').join('');
+    openModal('<h2>Assign scorer</h2><div class="picker-grid">'+rows+'</div><div class="pin-bottom"><button data-assign-live-pick="'+gi+':-1">Own goal</button><button class="ghost" data-close>Cancel</button></div>');
+    return;
+  }
+  if(t.dataset.assignHist!==undefined){
+    const [hi,gi]=t.dataset.assignHist.split(':').map(Number);
+    const rows=S.roster.map((r,i)=>'<button data-assign-hist-pick="'+hi+':'+gi+':'+i+'">'+esc(r.name)+'</button>').join('');
+    openModal('<h2>Assign scorer</h2><div class="picker-grid">'+rows+'</div><div class="pin-bottom"><button data-assign-hist-pick="'+hi+':'+gi+':-1">Own goal</button><button class="ghost" data-close>Cancel</button></div>');
+    return;
+  }
+});
+document.addEventListener('click',(e)=>{
+  const t=e.target.closest('[data-assign-live-pick],[data-assign-hist-pick]');
+  if(!t) return;
+  if(t.dataset.assignLivePick!==undefined){
+    const [gi,pi]=t.dataset.assignLivePick.split(':').map(Number);
+    const g=S.goals[gi];
+    if(g){ g.player=pi; g.player_name=pi===-1?'Own goal':S.roster[pi].name; }
+    closeModal(); openEditGoalsLive(); return;
+  }
+  if(t.dataset.assignHistPick!==undefined){
+    const [hi,gi,pi]=t.dataset.assignHistPick.split(':').map(Number);
+    const h=S.history[hi];
+    if(h){
+      const g=h.goals[gi];
+      if(g){
+        if(pi===-1){ g.player=-1; g.player_name='Own goal'; }
+        else {
+          const idx=(h.players||[]).findIndex(p=>p.name===S.roster[pi].name);
+          g.player=idx===-1?null:idx;
+          g.player_name=S.roster[pi].name;
+        }
+      }
+      syncHistoryGame(h);
+    }
+    closeModal(); render(); return;
   }
 });
 /* Backfill / delete goals in a past game (delegated separately: dynamic buttons in modal) */
