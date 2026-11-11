@@ -8,6 +8,12 @@
 import { useEffect, useRef, useState } from "react";
 import { Download, LogIn, Play, Share2 } from "lucide-react";
 import "./submanager/app.css";
+// Registers the app's PrismButton presets (sm-primary etc.) in the CLIENT
+// bundle. It must be imported here, not from layout.tsx: layout is a
+// server component, so its side-effect import registered the presets only
+// during prerender and never reached the browser — buttons silently fell
+// back to Prism's default paint="background".
+import "../config/button-presets";
 import { Engine } from "./submanager/engine";
 import {
   AppShell,

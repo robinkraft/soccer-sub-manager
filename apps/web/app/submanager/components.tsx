@@ -5,6 +5,7 @@
 
 import type { ReactNode } from "react";
 import {
+  PrismButton,
   PrismCard,
   PrismDivider,
   PrismLayoutMain,
@@ -32,24 +33,36 @@ import {
 
 export { Download, LogIn, Play };
 
-/* ---------- Plain button ---------- */
+/* ---------- Prism button ---------- */
 
 type BtnKind = "primary" | "default" | "ghost" | "danger" | "apply";
 
-// PBtn renders a plain <button> styled by app.css (button / button.primary /
-// button.apply / button.ghost / button.danger / button.small) — exactly as
-// the original does. PrismButton painted its sizes via inline style
-// (14px font, 8px 14px padding) and the unlayered blanket `button` rule
-// capped min-height at 44px, so Apply measured 44px/14px instead of the
-// spec's 56px/18px and every primary measured 14px instead of 16px.
-// The app.css kind classes carry the spec sizes, so a plain button
-// measures correctly with no inline-style fight.
-const BTN_CLASS: Record<BtnKind, string> = {
-  primary: "primary",
-  default: "",
-  ghost: "ghost",
-  danger: "danger",
-  apply: "apply",
+// PBtn renders a real PrismButton from the app presets registered in
+// config/button-presets.ts (pill, backgroundDark paints, no hover grow /
+// no icon motion). Sizes are sideline-tuned (see button-presets.ts):
+// regular buttons get a 16px font override (Prism regular is 14px, below
+// the sideline floor; large's 21px is too big for dense rows), Apply uses
+// preset size `large` as designed (~57px tall, spec 56px).
+// labelMaxWidth="none": PrismButton caps labels at 12rem by default,
+// which would truncate labels like "Return to full strength (7v7)".
+const BTN_PRESET: Record<BtnKind, string> = {
+  primary: "sm-primary",
+  default: "sm-default",
+  ghost: "sm-ghost",
+  danger: "sm-danger",
+  apply: "sm-apply",
+};
+
+// Mirrors the preset colours: PrismButtonProps types `color` as required
+// even though resolvePrismButtonPreset fills a default at runtime, so
+// PBtn must pass it explicitly. (Explicit props win over presets, so
+// these values are the effective colours.)
+const BTN_COLOR: Record<BtnKind, "blue" | "blue-grey" | "red" | "deep-orange"> = {
+  primary: "blue",
+  default: "blue-grey",
+  ghost: "blue-grey",
+  danger: "red",
+  apply: "deep-orange",
 };
 
 export function PBtn({
@@ -72,29 +85,28 @@ export function PBtn({
   type?: "button" | "submit";
 }) {
   const Icon = icon;
-  const cls = [BTN_CLASS[kind], small ? "small" : "", grow ? "grow" : ""]
-    .filter(Boolean)
-    .join(" ");
+  const isApply = kind === "apply";
+  const minH = isApply
+    ? "min-h-[56px]"
+    : small
+      ? "min-h-[36px]"
+      : "min-h-[44px]";
   return (
-    <button
-      type={type}
-      className={cls}
+    <PrismButton
+      label={label}
+      preset={BTN_PRESET[kind]}
+      color={{ palette: "default", swatchPrimary: BTN_COLOR[kind] }}
+      variant={Icon ? "icon" : "plain"}
+      icon={Icon}
+      size={isApply ? "large" : "regular"}
+      spacing={isApply ? "regular" : small ? "compact" : "comfortable"}
       disabled={disabled}
       onClick={onClick}
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        gap: 6,
-      }}
-    >
-      {Icon ? (
-        <span style={{ display: "inline-flex" }}>
-          <Icon size={18} strokeWidth={2.5} />
-        </span>
-      ) : null}
-      {label}
-    </button>
+      type={type}
+      labelMaxWidth="none"
+      className={(isApply ? "w-full " : "") + minH + (grow ? " flex-1" : "")}
+      style={isApply ? undefined : { fontSize: small ? 14 : 16 }}
+    />
   );
 }
 
@@ -114,7 +126,7 @@ export function LinkBtn({
       onClick={onClick}
       className={
         "min-h-[28px] border-0 bg-transparent px-1 py-[2px] text-[13px] font-bold " +
-        (danger ? "text-[#f87171]" : "text-[#94a3b8]")
+        (danger ? "text-destructive" : "text-muted-foreground")
       }
     >
       {label}
@@ -126,9 +138,9 @@ export function H2({ children }: { children: ReactNode }) {
   return (
     <PrismTypography
       role="headline"
-      size="regular"
+      size="small"
       as="h2"
-      className="mb-2 mt-[14px] text-[18px] font-bold text-[#f1f5f9]"
+      className="mb-2 mt-[14px]"
     >
       {children}
     </PrismTypography>
@@ -139,9 +151,9 @@ export function H3({ children }: { children: ReactNode }) {
   return (
     <PrismTypography
       role="title"
-      size="regular"
+      size="large"
       as="h3"
-      className="mb-[6px] mt-3 text-[16px] font-bold text-[#f1f5f9]"
+      className="mb-[6px] mt-3"
     >
       {children}
     </PrismTypography>
@@ -155,7 +167,7 @@ export function Muted({ children, center }: { children: ReactNode; center?: bool
       size="small"
       as="p"
       className={
-        "my-[6px] text-[14px] text-[#94a3b8]" + (center ? " text-center" : "")
+        "my-[6px] text-muted-foreground" + (center ? " text-center" : "")
       }
     >
       {children}
@@ -165,7 +177,7 @@ export function Muted({ children, center }: { children: ReactNode; center?: bool
 
 export function Card({ children }: { children: ReactNode }) {
   return (
-    <PrismCard className="my-2 gap-2 rounded-[14px] border border-[#1e3a4f] bg-[#122636] px-3 py-3 text-[#f1f5f9] shadow-none">
+    <PrismCard className="my-2 gap-2 px-4 py-4">
       {children}
     </PrismCard>
   );
@@ -181,7 +193,7 @@ export function Tabs({
   onSelect: (k: string) => void;
 }) {
   return (
-    <div className="tabs mt-[6px] flex gap-[6px] rounded-[14px] bg-[#0f2233] p-1" role="tablist">
+    <div className="tabs mt-[6px] flex gap-[6px] rounded-[14px] bg-muted p-1" role="tablist">
       {tabs.map(([k, label]) => (
         <button
           key={k}
@@ -189,12 +201,7 @@ export function Tabs({
           role="tab"
           aria-selected={current === k}
           onClick={() => onSelect(k)}
-          className={
-            "min-h-[44px] flex-1 rounded-[12px] border-2 px-2 text-[16px] font-bold " +
-            (current === k
-              ? "border-[#f59e0b] bg-[#fef3c7] text-[#78350f] shadow-[0_0_0_2px_#f59e0b]"
-              : "border-[#16283a] bg-[#16283a] text-[#cbd5e1]")
-          }
+          className="min-h-[44px] flex-1 rounded-full border-2 px-2 text-[16px] font-bold"
         >
           {label}
         </button>
@@ -568,7 +575,7 @@ export function SeasonTotals({ eng }: { eng: Engine }) {
   return (
     <>
       <div className="row spread" style={{ alignItems: "baseline" }}>
-        <h2 style={{ marginBottom: 2 }}>Season totals</h2>
+        <h2 className="season-h2" style={{ marginBottom: 2 }}>Season totals</h2>
         {!anonViewer ? (
           <span>
             <button
@@ -746,7 +753,10 @@ export function LoadingScreen() {
         gap: 12,
       }}
     >
-      <PrismSpinner size="regular" />
+      <PrismSpinner
+        size="regular"
+        color={{ palette: "default", swatchPrimary: "blue", shade: 500 }}
+      />
       <p className="muted" style={{ fontSize: 17 }}>
         Loading game…
       </p>

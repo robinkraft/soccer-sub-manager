@@ -1,40 +1,50 @@
-/* Sub Manager app styles — visual rules from the portable app (spec §16).
-   Phone-first 390x844; dark navy; green field; white chips; fixed heights
-   (48px field chips / 46px bench); no double-tap zoom. */
+/* Sub Manager app styles — Prism visual layer.
+   Phone-first 390x844; Prism dark theme (flat charcoal, Satoshi,
+   pill buttons, overline labels, blue house accent); field/bench/queue
+   GEOMETRY unchanged (48px field chips / 46px bench, 42% goal box flush
+   to the end line); no double-tap zoom.
+   Tokens below map the old app's names onto Prism's dark semantic tokens
+   (globals-prism.css :root/.dark) and Prism's Material palette, so the
+   structural rules underneath keep working unchanged. */
 :root{
-  --ink:#f1f5f9; --muted:#94a3b8; --bg:#0a1622; --card:#122636; --card2:#0f2233;
-  --line:#1e3a4f; --line2:#2a4a61;
-  --green:#34d399; --green-dark:#0b3d2e; --green-bg:#d1fae5;
-  --yellow:#fef3c7; --yellow-ink:#78350f; --yellow-ring:#f59e0b;
-  --orange:#c2410c; --orange-bg:#ea580c;
-  --red:#f87171; --red-bg:#450a0a;
-  --blue:#93c5fd; --blue-bg:#1e3a8a;
-  --field:#1c8a4c; --field-dark:#14663a; --field-line:rgba(255,255,255,.75);
+  --ink:var(--foreground); --muted:var(--muted-foreground);
+  --bg:var(--background); --card:var(--card); --card2:var(--muted);
+  --line:oklch(1 0 0 / 15%); --line2:var(--input);
+  --green:#66bb6a; --green-dark:#2e7d32; --green-bg:#c8e6c9;
+  --yellow:#ffecb3; --yellow-ink:#bf360c; --yellow-ring:#ffb300;
+  --orange:#ff7043; --orange-bg:#d84315;
+  --red:#ef5350; --red-bg:#c62828;
+  --blue:#42a5f5; --blue-bg:#1565c0;
+  --field:#43a047; --field-dark:#2e7d32; --field-line:rgba(255,255,255,.75);
 }
 html,body{margin:0;padding:0;overflow-x:hidden;touch-action:manipulation}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+body{font-family:var(--font-satoshi),system-ui,sans-serif;
   background:var(--bg); color:var(--ink); font-size:16px; line-height:1.35;
   -webkit-text-size-adjust:100%}
+/* Team head: Prism display-small (40px/500, tight tracking). */
 .team-head{padding:2px 12px 0}
-.team-head h2{font-size:30px;font-weight:900;margin:0;line-height:1.1}
-h2{font-size:18px;margin:14px 0 8px}
-h3{font-size:16px;margin:12px 0 6px}
+.team-head h2{font-size:40px;font-weight:500;margin:0;line-height:1.08;letter-spacing:-.25px}
+/* NOTE: no generic h2/h3 rules here — they would beat PrismTypography's
+   layered .typography-* classes. Headings go through H2/H3 (Prism
+   roles); the one plain h2 left (SeasonTotals) uses .season-h2 below. */
+.season-h2{font-size:22px;font-weight:500;margin:0;line-height:1.2}
 p{margin:6px 0}
-button{font:inherit;cursor:pointer;min-height:44px;border-radius:12px;border:2px solid var(--line2);
-  background:var(--card);color:var(--ink);padding:8px 12px;font-weight:700;touch-action:manipulation}
-button.primary{background:var(--green);border-color:var(--green);color:#052e16}
-button.apply{background:var(--orange);border-color:var(--orange);color:#fff;font-size:18px;min-height:56px;width:100%}
-button.danger{background:var(--red-bg);border-color:var(--red);color:var(--red)}
-button.ghost{border-color:var(--line2);font-weight:600;background:transparent}
-button.small{min-height:36px;padding:4px 10px;font-size:14px;border-radius:8px}
+/* Plain <button> elements (tabs, bench, chips, score +/-, pills, picker,
+   stepper, pos-chips, attend, .small/.ghost/.danger) are styled by the
+   scoped rules below — there is intentionally no blanket `button` rule:
+   PrismButton paints itself inline, and a blanket rule would beat
+   Tailwind utilities app-wide. */
+button{font-family:inherit;cursor:pointer;touch-action:manipulation}
+button.small{min-height:36px;padding:4px 10px;font-size:14px;font-weight:700;
+  border-radius:9999px;border:2px solid var(--input);background:transparent;color:var(--ink)}
+button.ghost{color:var(--muted);font-weight:600}
+button.danger{background:var(--red-bg);border-color:var(--red-bg);color:#ffcdd2}
 button:disabled{opacity:.45;cursor:not-allowed}
-button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:3px solid var(--yellow-ring);outline-offset:2px}
-/* Tabs — plain-CSS rules (not Tailwind utilities): the unlayered blanket
-   `button` rule above beats Tailwind v4's @layer utilities, so the selected
-   tab's pale-yellow classes lost. These scoped rules win on specificity
-   and render the selected tab pale yellow, exactly as the original. */
-.tabs button{flex:1;min-height:44px;background:#16283a;border-color:#16283a;color:#cbd5e1;border-radius:12px}
-.tabs button[aria-selected="true"]{background:var(--yellow);color:var(--yellow-ink);border-color:var(--yellow-ring);box-shadow:0 0 0 2px var(--yellow-ring)}
+button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible{outline:3px solid var(--ring);outline-offset:2px}
+/* Tabs — Prism tokens: muted container, pill tabs; selected is the Prism
+   primary (near-white fill, near-black text), not the old pale yellow. */
+.tabs button{flex:1;min-height:44px;background:transparent;border:2px solid transparent;color:var(--muted);border-radius:9999px}
+.tabs button[aria-selected="true"]{background:var(--primary);color:var(--primary-foreground);border-color:var(--primary);box-shadow:var(--prism-shadow-soft)}
 .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:12px;margin:8px 0}
 .muted{color:var(--muted);font-size:14px}
 .small{font-size:13px}
@@ -43,85 +53,88 @@ button:focus-visible,a:focus-visible,input:focus-visible,textarea:focus-visible,
 .spread{justify-content:space-between}
 .grow{flex:1 1 auto}
 label{font-weight:700;font-size:14px}
-input[type=text],input[type=number],input[type=email],input[type=password],textarea,select{font:inherit;padding:9px 10px;border:2px solid var(--line2);border-radius:8px;background:#0d1f2e;color:var(--ink);width:100%}
+input[type=text],input[type=number],input[type=email],input[type=password],textarea,select{font:inherit;padding:9px 10px;border:2px solid var(--input);border-radius:8px;background:var(--background);color:var(--ink);width:100%}
 input[type=number]{width:84px}
 textarea{min-height:90px;resize:vertical}
 details{border:1px solid var(--line);border-radius:10px;background:var(--card);padding:8px 10px;margin:8px 0}
 details summary{font-weight:800;cursor:pointer;min-height:44px;display:flex;align-items:center}
 
-/* Scoreboard */
+/* Scoreboard — Satoshi, clock bumped to Prism headline-large (32px/800);
+   score numbers stay 26px: the §16.3 row-width budget (114px sides) has
+   no room for larger two-digit scores. */
 .scoreboard{background:var(--bg);color:var(--ink);border-radius:12px;padding:2px 0 0;text-align:center}
-.scoreboard .clock{font-size:26px;font-weight:900;letter-spacing:1px;line-height:1}
+.scoreboard .clock{font-size:32px;font-weight:800;letter-spacing:.5px;line-height:1}
 .scoreboard .score-row{display:flex;align-items:center;justify-content:space-between;gap:2px;flex-wrap:nowrap}
 .scoreboard .side{display:flex;align-items:center;gap:4px;min-width:0;flex-shrink:1}
 .scoreboard .score-col{display:flex;flex-direction:column;align-items:center;line-height:1.05;min-width:26px}
-.scoreboard .team-label{font-size:11px;font-weight:800;letter-spacing:.5px;color:var(--muted)}
-.scoreboard .score-num{font-size:26px;font-weight:900}
-.scoreboard .side button{min-width:40px;min-height:40px;font-size:20px;border-radius:12px;border:2px solid var(--line2);background:#1b3247;color:var(--ink);padding:0}
+.scoreboard .team-label{font-size:12px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.scoreboard .score-num{font-size:26px;font-weight:800}
+.scoreboard .side button{min-width:40px;min-height:40px;font-size:20px;border-radius:10px;border:2px solid var(--input);background:var(--secondary);color:var(--ink);padding:0}
 .scoreboard .clock-mid{display:flex;flex-direction:column;align-items:center;gap:4px;min-width:0;flex-shrink:1}
 .clock-controls{display:flex;gap:6px}
-.clock-controls .pill{min-height:28px;padding:2px 8px;font-size:12px;border-radius:999px;background:#1b3247;color:var(--ink);border-color:var(--line2);font-weight:800}
-.clock-controls .pill.pause{background:var(--orange);border-color:var(--orange);color:#fff;letter-spacing:.5px}
+.clock-controls .pill{min-height:28px;padding:2px 8px;font-size:12px;border-radius:999px;background:var(--secondary);color:var(--ink);border:2px solid var(--input);font-weight:800}
+.clock-controls .pill.pause{background:var(--orange-bg);border-color:var(--orange-bg);color:#fff;letter-spacing:.5px}
 .game-actions{display:flex;gap:10px;justify-content:center;align-items:center;padding:2px 0 0}
 .game-actions .linklike{background:none;border:none;color:var(--muted);font-weight:700;font-size:13px;min-height:28px;padding:2px 4px}
 .game-actions .linklike.danger-link{color:var(--red)}
 .game-actions span{color:var(--muted)}
 
-/* Field — same component everywhere */
+/* Field — same component everywhere; pitch in Material green (green-600
+   → green-800) instead of the old custom green. Geometry unchanged. */
 .field-wrap{position:sticky;top:0;z-index:10;background:var(--bg);padding:2px 0 2px}
-.field{background:linear-gradient(180deg,var(--field),var(--field-dark));border:3px solid #e2e8f0;border-radius:16px;padding:8px 6px;color:#fff;position:relative}
+.field{background:linear-gradient(180deg,var(--field),var(--field-dark));border:3px solid #e2e8f0;border-radius:14px;padding:8px 6px;color:#fff;position:relative}
 .field .f-row{position:relative;z-index:1;display:flex;gap:6px;justify-content:center;margin:4px 0}
 .field .f-row.mid{justify-content:space-between}
 .spot{flex:1;max-width:118px;min-width:0;position:relative}
-.spot .chip{position:relative;background:#fff;color:#0f172a;border:2px solid #0f172a;border-radius:12px;
+.spot .chip{position:relative;background:#fff;color:#263238;border:2px solid #263238;border-radius:10px;
   height:48px;padding:2px 2px;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;
-  font-weight:800;font-size:14px;line-height:1.1;white-space:normal;overflow-wrap:anywhere;width:100%;cursor:pointer}
+  font-weight:800;font-size:14px;line-height:1.1;white-space:normal;overflow-wrap:anywhere;width:100%;cursor:pointer;
+  box-shadow:var(--prism-shadow-soft)}
 .spot .chip>span:first-child{white-space:nowrap}
 .spot .chip .sub{position:static;display:block;line-height:1.1;text-align:center}
 .spot .chip .mins,.spot .chip .pair{display:inline}
-.spot .chip .mins{font-size:10px;font-weight:700;color:#475569}
+.spot .chip .mins{font-size:10px;font-weight:700;color:#757575}
 .spot .chip .pair{margin-left:4px}
 .spot .chip.empty{background:rgba(255,255,255,.18);color:#fff;border-style:dashed;border-color:#fff;font-weight:700}
 .spot .chip.removed{background:rgba(0,0,0,.3);color:#fff;border-style:dashed}
-.spot .chip.tired{box-shadow:inset 0 0 0 3px #f97316}
-.spot .chip.selected{box-shadow:0 0 0 3px var(--yellow-ring);background:#fef9c3}
-.spot .chip.queued-off{background:#fef9c3;border-color:#b45309}
-.spot .chip.queued-on{background:#dcfce7}
-.spot .chip.swap-staged{background:#dbeafe;box-shadow:0 0 0 3px #3b82f6}
+.spot .chip.tired{box-shadow:inset 0 0 0 3px #fb8c00}
+.spot .chip.selected{box-shadow:0 0 0 3px var(--yellow-ring);background:#ffecb3}
+.spot .chip.queued-off{background:#ffecb3;border-color:#ff8f00}
+.spot .chip.queued-on{background:#c8e6c9}
+.spot .chip.swap-staged{background:#bbdefb;box-shadow:0 0 0 3px #1976d2}
 .badge{position:absolute;top:-11px;left:50%;transform:translateX(-50%);white-space:nowrap;
-  font-size:11px;font-weight:900;background:#78350f;color:#fff;border-radius:999px;padding:2px 7px;line-height:1.3;z-index:2}
-.badge.off{background:#78350f}.badge.on{background:#166534}
-.pair{font-size:10px;font-weight:800;color:#92400e}
+  font-size:11px;font-weight:900;background:#bf360c;color:#fff;border-radius:999px;padding:2px 7px;line-height:1.3;z-index:2}
+.badge.off{background:#bf360c}.badge.on{background:#1b5e20}
+.pair{font-size:10px;font-weight:800;color:#bf360c}
 .field .gk-box{width:42%;margin:2px auto -11px;border:2px solid rgba(255,255,255,.55);border-bottom:none;border-radius:8px 8px 0 0;padding:2px 0 4px}
 .field-swap{position:absolute;right:0;bottom:6px;z-index:3}
-.field-swap button{min-height:48px;min-width:96px;padding:8px 14px;font-size:16px;border-radius:12px;white-space:nowrap}
 .apply-slot{min-height:58px;margin-top:6px;display:flex;align-items:center}
 .apply-slot .apply{margin:0}
 
-/* Bench */
+/* Bench — Prism secondary surface, pill-radius chips. */
 .bench{display:flex;flex-wrap:wrap;gap:6px}
-.bench button{flex:1 1 30%;height:46px;padding:3px 8px;font-size:14px;border-radius:12px;line-height:1.1;background:#16283a;border:2px solid var(--line2);color:var(--ink);text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;white-space:normal;overflow-wrap:anywhere}
+.bench button{flex:1 1 30%;height:46px;padding:3px 8px;font-size:14px;border-radius:10px;line-height:1.1;background:var(--secondary);border:2px solid var(--line);color:var(--ink);text-align:center;display:flex;flex-direction:column;align-items:center;justify-content:center;position:relative;white-space:normal;overflow-wrap:anywhere}
 .bench button .b-name{font-weight:800;white-space:nowrap}
 .bench button .b-sub{position:static;display:block;line-height:1.1;text-align:center}
 .bench button .b-mins{font-size:10px;font-weight:700;color:var(--muted)}
-.bench button .b-pair{margin-left:4px;font-size:10px;font-weight:800;color:#92400e}
-.bench button .b-badge{position:absolute;top:-12px;left:50%;transform:translateX(-50%);white-space:nowrap;font-size:11px;font-weight:900;background:#78350f;color:#fff;border-radius:999px;padding:2px 7px;line-height:1.3;z-index:2}
-.bench button.selected{background:#fef9c3;color:#78350f;border-color:var(--yellow-ring)}
-.bench button.queued-on{background:#fef9c3;border-color:#b45309;color:#78350f}
-.bench button.queued-on .b-mins{color:#475569}
-.bench button.tired{border-color:#f97316;box-shadow:inset 0 0 0 2px #f97316}
+.bench button .b-pair{margin-left:4px;font-size:10px;font-weight:800;color:#bf360c}
+.bench button .b-badge{position:absolute;top:-12px;left:50%;transform:translateX(-50%);white-space:nowrap;font-size:11px;font-weight:900;background:#bf360c;color:#fff;border-radius:999px;padding:2px 7px;line-height:1.3;z-index:2}
+.bench button.selected{background:#ffecb3;color:#bf360c;border-color:#ffb300}
+.bench button.queued-on{background:#ffecb3;border-color:#ff8f00;color:#bf360c}
+.bench button.queued-on .b-mins{color:#757575}
+.bench button.tired{border-color:#fb8c00;box-shadow:inset 0 0 0 2px #fb8c00}
 .v-bench{display:flex;flex-wrap:wrap;gap:6px}
-.v-bench-row{flex:1 1 30%;height:46px;padding:3px 8px;font-size:14px;border-radius:12px;line-height:1.2;background:#16283a;border:2px solid var(--line2);color:var(--ink);display:flex;align-items:center;justify-content:space-between;gap:0 6px}
+.v-bench-row{flex:1 1 30%;height:46px;padding:3px 8px;font-size:14px;border-radius:10px;line-height:1.2;background:var(--secondary);border:2px solid var(--line);color:var(--ink);display:flex;align-items:center;justify-content:space-between;gap:0 6px}
 .v-bench-row .b-name{font-weight:800;white-space:nowrap}
 .v-bench-row .b-mins{color:var(--muted);font-size:13px;font-weight:700}
 .bench-head{display:flex;justify-content:space-between;align-items:baseline;gap:8px;margin:6px 0 4px}
 .bench-head h3{margin:0}
 .bench-head .small{text-align:right}
 
-/* Queue */
-.queue-item{display:flex;gap:8px;align-items:center;background:#16283a;border:2px solid var(--line2);border-radius:12px;padding:6px 10px;margin:4px 0;font-weight:700}
-.queue-item .arrow{font-size:20px;color:var(--green)}
-.queue-item .q-num{background:var(--green);color:#052e16;border-radius:50%;min-width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;font-weight:900}
+/* Queue — blue house accent for the number badge and arrow. */
+.queue-item{display:flex;gap:8px;align-items:center;background:var(--secondary);border:2px solid var(--line);border-radius:10px;padding:6px 10px;margin:4px 0;font-weight:700}
+.queue-item .arrow{font-size:20px;color:var(--blue)}
+.queue-item .q-num{background:var(--blue-bg);color:#bbdefb;border-radius:50%;min-width:26px;height:26px;display:inline-flex;align-items:center;justify-content:center;font-weight:900}
 .queue-item button{margin-left:auto}
 .queue-area h3{margin:8px 0 2px}
 .queue-area p{margin:2px 0 4px}
@@ -129,68 +142,68 @@ details summary{font-weight:800;cursor:pointer;min-height:44px;display:flex;alig
 .row.actions-row{margin-top:6px}
 
 /* Minutes / team rows */
-.mrow{display:flex;gap:8px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px;margin:6px 0}
+.mrow{display:flex;gap:8px;align-items:center;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;margin:6px 0}
 .mrow .name{font-weight:800;min-width:0;overflow-wrap:anywhere}
 .mrow .nums{margin-left:auto;text-align:right;white-space:nowrap;font-weight:700}
 .flag{font-size:12px;font-weight:900;border-radius:999px;padding:2px 8px;white-space:nowrap}
-.flag.low{background:#7f1d1d;color:#fecaca}
-.flag.high{background:#78350f;color:#fde68a}
-.flag.ok{background:#14532d;color:#bbf7d0}
-.flag.gk{background:#1e3a8a;color:#bfdbfe}
-.tired-dot{color:#fb923c;font-weight:900}
+.flag.low{background:#ffcdd2;color:#c62828}
+.flag.high{background:#ffecb3;color:#bf360c}
+.flag.ok{background:#c8e6c9;color:#1b5e20}
+.flag.gk{background:#bbdefb;color:#0d47a1}
+.tired-dot{color:#fb8c00;font-weight:900}
 
 /* Roster rows */
-.avail{width:40px;height:40px;border-radius:50%;border:2px solid var(--line2);background:#16283a;color:var(--green);font-size:20px;font-weight:900;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;padding:0;min-height:40px}
+.avail{width:40px;height:40px;border-radius:50%;border:2px solid var(--input);background:var(--secondary);color:var(--green);font-size:20px;font-weight:900;flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;padding:0;min-height:40px}
 .avail.absent{background:transparent;color:var(--muted)}
 .roster-row{padding:8px 10px}
 .roster-top{display:flex;gap:6px;align-items:center;flex-wrap:nowrap}
 .roster-top .avail{width:32px;height:32px;min-height:32px;font-size:16px}
 .roster-id{flex:1 1 auto;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .roster-id .name{font-weight:800}
-button.xs{min-height:32px;padding:2px 9px;font-size:13px;border-radius:8px;flex:0 0 auto}
+button.xs{min-height:32px;padding:2px 9px;font-size:13px;border-radius:9999px;flex:0 0 auto}
 .pos-chips{display:flex;gap:4px;flex-wrap:nowrap;margin-top:6px}
-.pos-chips button{flex:1 1 0;min-width:0;min-height:32px;padding:2px 0;font-size:12px;border-radius:8px;background:#16283a;border-color:var(--line2);color:#cbd5e1;white-space:nowrap;text-align:center}
-.pos-chips button[aria-pressed="true"]{background:var(--green);border-color:var(--green);color:#052e16}
+.pos-chips button{flex:1 1 0;min-width:0;min-height:32px;padding:2px 0;font-size:12px;border-radius:10px;background:var(--secondary);border:2px solid var(--input);color:#cfd8dc;white-space:nowrap;text-align:center}
+.pos-chips button[aria-pressed="true"]{background:var(--green-dark);border-color:var(--green-dark);color:var(--green-bg)}
 .pos-chips button.xs{flex:0 0 auto;padding:2px 9px;font-size:13px}
 
-/* Picker / modal */
+/* Picker / modal — Prism popover surface. */
 .overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:50;display:flex;align-items:flex-end;justify-content:center}
-.sheet{background:#122636;border:1px solid var(--line2);border-radius:16px 16px 0 0;width:100%;max-width:480px;max-height:88vh;overflow:auto;padding:12px 12px 24px;color:var(--ink)}
+.sheet{background:var(--popover);border:1px solid var(--line);border-radius:16px 16px 0 0;width:100%;max-width:480px;max-height:88vh;overflow:auto;padding:12px 12px 24px;color:var(--ink);box-shadow:var(--prism-shadow-medium)}
 .sheet h2{margin:4px 0 8px}
 .picker-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
-.picker-grid button{min-height:44px;padding:6px 8px;font-size:15px;text-align:left;white-space:normal;overflow-wrap:anywhere;line-height:1.2;background:#16283a}
+.picker-grid button{min-height:44px;padding:6px 8px;font-size:15px;text-align:left;white-space:normal;overflow-wrap:anywhere;line-height:1.2;background:var(--secondary);border:2px solid var(--line);border-radius:10px;color:var(--ink)}
 .picker-grid button .sub{display:block;font-size:12px;font-weight:600;color:var(--muted)}
 .sheet .pin-bottom{margin-top:8px;display:flex;flex-direction:column;gap:6px}
 .sheet .pin-bottom button{width:100%}
 .stepper{display:flex;gap:8px;align-items:center;justify-content:center;margin:8px 0}
-.stepper button{min-width:52px;font-size:22px}
-.stepper .min-val{font-size:24px;font-weight:900;min-width:90px;text-align:center}
+.stepper button{min-width:52px;font-size:22px;border-radius:10px;border:2px solid var(--input);background:var(--secondary);color:var(--ink)}
+.stepper .min-val{font-size:24px;font-weight:800;min-width:90px;text-align:center}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
-.chips button{min-height:40px;padding:4px 10px;font-size:14px}
-.chips button[aria-pressed="true"]{background:var(--green);color:#052e16;border-color:var(--green)}
+.chips button{min-height:40px;padding:4px 10px;font-size:14px;border-radius:9999px;border:2px solid var(--input);background:transparent;color:var(--ink);font-weight:700}
+.chips button[aria-pressed="true"]{background:var(--green-dark);color:var(--green-bg);border-color:var(--green-dark)}
 .attend{display:flex;flex-wrap:wrap;gap:6px}
-.attend button{min-height:44px;padding:6px 10px;font-size:14px}
-.attend button.absent{background:#1e293b;text-decoration:line-through;color:var(--muted)}
+.attend button{min-height:44px;padding:6px 10px;font-size:14px;border-radius:9999px;border:2px solid var(--input);background:var(--secondary);color:var(--ink);font-weight:700}
+.attend button.absent{background:color-mix(in oklch, var(--muted) 30%, transparent);text-decoration:line-through;color:var(--muted)}
 .note-line{font-size:13px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.banner{background:#78350f;border:2px solid #f59e0b;border-radius:10px;padding:10px;font-weight:700;color:#fef3c7}
+.banner{background:#4e342e;border:2px solid #ffb300;border-radius:10px;padding:10px;font-weight:700;color:#ffecb3}
 .banner-viewer{display:flex;flex-wrap:wrap;align-items:center;gap:0 10px;padding:2px 10px;font-size:12px;line-height:1.3;border-radius:8px}
-.banner-viewer .banner-link{background:none;border:none;color:#fde68a;font-weight:800;font-size:12px;line-height:1.3;min-height:0;padding:0 2px;text-decoration:underline;text-underline-offset:2px}
-.error{background:#450a0a;border:2px solid var(--red);color:#fecaca;border-radius:10px;padding:10px;font-weight:700}
-.badge-pill{display:inline-block;background:#14532d;color:#bbf7d0;border-radius:999px;padding:3px 10px;font-size:12px;font-weight:900;letter-spacing:1px}
-.halftime-head h2{font-size:34px;font-weight:800;margin:8px 0;line-height:1.1}
+.banner-viewer .banner-link{background:none;border:none;color:#ffecb3;font-weight:800;font-size:12px;line-height:1.3;min-height:0;padding:0 2px;text-decoration:underline;text-underline-offset:2px}
+.error{background:rgba(198,40,40,.22);border:2px solid var(--red);color:#ffcdd2;border-radius:10px;padding:10px;font-weight:700}
+.badge-pill{display:inline-block;background:var(--green-dark);color:var(--green-bg);border-radius:999px;padding:3px 10px;font-size:12px;font-weight:900;letter-spacing:1px;text-transform:uppercase}
+.halftime-head h2{font-size:32px;font-weight:500;margin:8px 0;line-height:1.125;letter-spacing:-.25px}
 .hidden{display:none!important}
 @media (max-width:360px){.picker-grid{grid-template-columns:1fr}.bench button{flex-basis:46%}}
 
 /* Season totals cards */
 .season-card{padding:14px}
 .season-name{font-size:20px;font-weight:800}
-.season-avg{font-size:26px;font-weight:900}
-.season-total{font-size:22px;font-weight:900;text-align:right}
+.season-avg{font-size:26px;font-weight:800}
+.season-total{font-size:22px;font-weight:800;text-align:right}
 .season-pos{margin-top:6px}
-.season-csv-link{color:var(--green);background:none;border:none;font-weight:800;font-size:16px;min-height:44px;padding:8px 4px}
+.season-csv-link{color:var(--blue);background:none;border:none;font-weight:800;font-size:16px;min-height:44px;padding:8px 4px}
 .two-col{columns:2;column-gap:12px}
 .two-col .mrow{break-inside:avoid}
 
 /* Live-update toast */
-.live-toast{position:fixed;top:10px;left:50%;transform:translateX(-50%) translateY(-6px);background:#14532d;color:#bbf7d0;border:1px solid #22c55e;border-radius:999px;padding:6px 14px;font-size:13px;font-weight:800;letter-spacing:.2px;opacity:0;pointer-events:none;transition:opacity .35s ease,transform .35s ease;z-index:60;white-space:nowrap}
+.live-toast{position:fixed;top:10px;left:50%;transform:translateX(-50%) translateY(-6px);background:var(--green-dark);color:var(--green-bg);border:1px solid #4caf50;border-radius:999px;padding:6px 14px;font-size:13px;font-weight:800;letter-spacing:.2px;opacity:0;pointer-events:none;transition:opacity .35s ease,transform .35s ease;z-index:60;white-space:nowrap}
 .live-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}

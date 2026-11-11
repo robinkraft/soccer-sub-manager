@@ -1,7 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { satoshi, sentient, zodiak } from "@ui";
 import "../ui/styles/globals.css";
-import "../config/button-presets";
 
 export const metadata: Metadata = {
   title: "Soccer Substitution Manager",
@@ -31,7 +30,7 @@ export const viewport: Viewport = {
   maximumScale: 1,
   userScalable: false,
   viewportFit: "cover",
-  themeColor: "#0b1526",
+  themeColor: "#242424",
 };
 
 export default function RootLayout({
@@ -43,7 +42,7 @@ export default function RootLayout({
     <html
       lang="en"
       suppressHydrationWarning
-      className={`${satoshi.variable} ${sentient.variable} ${zodiak.variable}`}
+      className={`${satoshi.variable} ${sentient.variable} ${zodiak.variable} dark`}
     >
       <body className="antialiased">{children}</body>
     </html>
