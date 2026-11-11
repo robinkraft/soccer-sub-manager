@@ -1,0 +1,128 @@
+# GitHub Pages: serve main at the root + the Prism redesign preview at /preview/prism/
+#
+# !!! THIS FILE BELONGS ON main (the default branch) !!!
+# Pages-deployment workflows run from the default branch. Place it at
+# .github/workflows/pages-preview.yml ON MAIN — do not push it to
+# prism-redesign alone (a copy there would never run the deploy).
+#
+# ENABLING (Robin):
+#   1. Merge/copy this file to main (e.g. via a PR from prism-redesign, or
+#      commit it directly to main).
+#   2. Repo Settings → Pages → Build and deployment → Source: GitHub Actions.
+#      (Today the source is "Deploy from a branch"; flipping it hands serving
+#      to this workflow. The workflow re-publishes main's files at the root,
+#      so the live app keeps serving unchanged.)
+#   3. Push anything to main or prism-redesign (or Run workflow) and watch
+#      the Actions run go green; then open
+#      https://robinkraft.github.io/soccer-sub-manager/preview/prism/
+#
+# HOW IT WORKS
+#   - Checks out main into ./main (the live app) and prism-redesign into
+#     ./preview, builds the redesign with PREVIEW_BASE_PATH=/soccer-sub-manager/preview/prism
+#     (the Next.js app reads that env var into basePath in next.config.ts,
+#     so all /_next/* asset URLs are prefixed — without it the preview page
+#     would load but its JS/CSS would 404), then assembles ONE Pages
+#     artifact: main's files at the root, the built export under
+#     /preview/prism/. One deploy, both URLs, main untouched.
+#   - The branch carries no prism/ gitlink (snapshot pushes cannot create
+#     one), so the workflow clones Prism at the pinned SHA before install.
+#     Pin: d5a0f7defdad76415bf74d1caccde48e743b2dfc (see SCAFFOLD.md).
+#   - pnpm 10.28.0 / Node 24, matching the verified local toolchain.
+#     --ignore-scripts skips the root `prepare` (husky + prism:sync) which
+#     is dev-only; the build itself needs no lifecycle scripts.
+#   - .nojekyll is added because the preview's assets live under _next/,
+#     which Jekyll would otherwise ignore.
+#
+# FALLBACKS (only if this route proves unworkable — do not build without asking):
+#   - Separate preview repo (e.g. robinkraft/soccer-sub-manager-prism) with
+#     its own Pages site at /soccer-sub-manager-prism/ — simple, but a second
+#     repo/URL to maintain and no shared preview path.
+#   - Vercel: the app is already Vercel-shaped (vercel.json present) and
+#     Vercel gives per-branch preview URLs for free — but it is a second
+#     host outside the GitHub Pages site Robin already uses.
+
+name: Pages — main + Prism preview
+
+on:
+  push:
+    branches: [main, prism-redesign]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      # 1. Live app (main) -> site root
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          path: main
+
+      # 2. Redesign branch -> preview build
+      - name: Checkout prism-redesign
+        uses: actions/checkout@v4
+        with:
+          ref: prism-redesign
+          path: preview
+
+      # The branch carries no prism/ gitlink (snapshot pushes cannot create
+      # one), so clone Prism at the pinned SHA before installing.
+      - name: Clone Prism (pinned SHA)
+        working-directory: preview
+        run: |
+          git clone https://github.com/thushana/prism.git prism
+          git -C prism checkout d5a0f7defdad76415bf74d1caccde48e743b2dfc
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.28.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: pnpm
+          cache-dependency-path: preview/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: preview
+        env:
+          npm_config_manage_package_manager_versions: "false"
+        run: pnpm install --frozen-lockfile --ignore-scripts --config.manage-package-manager-versions=false
+
+      - name: Build preview (basePath /soccer-sub-manager/preview/prism)
+        working-directory: preview
+        env:
+          PREVIEW_BASE_PATH: /soccer-sub-manager/preview/prism
+          NEXT_TELEMETRY_DISABLED: "1"
+        run: pnpm --filter web run build
+
+      # 3. Assemble one Pages artifact: main at root, preview under /preview/prism/
+      - name: Assemble site
+        run: |
+          rm -rf _site && mkdir -p _site/preview/prism
+          cp -r main/. _site/
+          rm -rf _site/.git _site/.github
+          cp -r preview/apps/web/out/. _site/preview/prism/
+          touch _site/.nojekyll
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
