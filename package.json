@@ -1,0 +1,61 @@
+{
+  "name": "soccer-sub-manager",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": "24.x"
+  },
+  "bin": {
+    "soccer-sub-manager": "./apps/web/cli/index.js"
+  },
+  "scripts": {
+    "build": "pnpm --filter web run build",
+    "build:web": "pnpm --filter web run build",
+    "chores": "tsx prism/scripts/chores.ts",
+    "clean": "rm -rf apps/*/.next apps/*/node_modules/.cache *.tsbuildinfo",
+    "db:generate": "pnpm --filter web run db:generate",
+    "db:migrate": "pnpm --filter web run db:migrate",
+    "db:push": "pnpm --filter web run db:push",
+    "db:seed": "pnpm --filter web run db:seed",
+    "db:studio": "pnpm --filter web run db:studio",
+    "dev": "pnpm --filter web run dev",
+    "dev:web": "pnpm --filter web run dev",
+    "format": "prettier --write \"apps/web/**/*.{ts,tsx,js,mjs,cjs}\" \"docs/**/*.{md,mdx}\"",
+    "format:check": "prettier --check \"apps/web/**/*.{ts,tsx,js,mjs,cjs}\" \"docs/**/*.{md,mdx}\"",
+    "generate:colors": "cd prism/packages/ui && pnpm run generate:colors",
+    "knip": "knip --dependencies",
+    "knip:exports": "knip --exports",
+    "lint": "pnpm --filter web run lint",
+    "lint:fix": "pnpm --filter web run lint:fix",
+    "precommit": "pnpm exec lint-staged",
+    "prepare": "husky && tsx prism/scripts/sync-commands.ts",
+    "prism:sync": "tsx prism/scripts/sync.ts",
+    "prism:sync:commands": "tsx prism/scripts/sync-commands.ts",
+    "prism:sync:hooks": "tsx prism/scripts/install-consumer-git-hooks.ts",
+    "prism:sync:dependencies": "tsx prism/scripts/sync-dependencies.ts",
+    "prism:sync:git": "tsx prism/scripts/sync-git.ts",
+    "prism:sync:scripts": "tsx prism/scripts/sync-scripts.ts",
+    "quality": "tsx prism/scripts/quality.ts",
+    "quality:ci": "pnpm run format:check && pnpm run lint && pnpm run typecheck && pnpm run knip && pnpm run test:run && pnpm run build",
+    "quality:quick": "pnpm run format && pnpm run lint && pnpm run typecheck",
+    "setup": "pnpm link --global && pnpm run prism:sync",
+    "start": "pnpm --filter web run start",
+    "start:web": "pnpm --filter web run start",
+    "soccer-sub-manager": "tsx apps/web/cli/index.ts",
+    "test": "pnpm --filter web run test",
+    "test:run": "pnpm --filter web run test:run",
+    "typecheck": "pnpm --filter web run typecheck",
+    "vercel:build": "vercel build --cwd apps/web",
+    "vercel:test:web": "pnpm --filter web run build"
+  },
+  "devDependencies": {
+    "eslint": "^10.4.1",
+    "eslint-config-next": "16.2.7",
+    "husky": "^9.1.7",
+    "knip": "^6.15.0",
+    "lint-staged": "^17.0.7",
+    "prettier": "^3.8.3",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext"
+    ],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "ignoreDeprecations": "6.0",
+    "noEmit": true,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "react-jsx",
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "baseUrl": ".",
+    "paths": {
+      "@/*": [
+        "./*"
+      ],
+      "react": [
+        "node_modules/@types/react/index.d.ts"
+      ],
+      "react-dom": [
+        "node_modules/@types/react-dom/index.d.ts"
+      ],
+      "react/jsx-runtime": [
+        "node_modules/@types/react/jsx-runtime.d.ts"
+      ],
+      "react/jsx-dev-runtime": [
+        "node_modules/@types/react/jsx-dev-runtime.d.ts"
+      ],
+      "next": [
+        "node_modules/next/index.d.ts"
+      ],
+      "next/*": [
+        "node_modules/next/*"
+      ],
+      "@database": [
+        "../../prism/packages/database/source"
+      ],
+      "@intelligence": [
+        "../../prism/packages/intelligence/source"
+      ],
+      "@logger": [
+        "../../prism/packages/logger/source"
+      ],
+      "@logger/*": [
+        "../../prism/packages/logger/source/*"
+      ],
+      "@intelligence/tasks": [
+        "../../prism/packages/intelligence/source/tasks"
+      ],
+      "@intelligence/tasks/*": [
+        "../../prism/packages/intelligence/source/tasks/*"
+      ],
+      "@intelligence/client": [
+        "../../prism/packages/intelligence/source/client"
+      ],
+      "@ui": [
+        "../../prism/packages/ui/source"
+      ],
+      "@ui/map": [
+        "../../prism/packages/ui/source/map.ts"
+      ],
+      "@ui/pickers": [
+        "../../prism/packages/ui/source/pickers.ts"
+      ],
+      "@utilities": [
+        "../../prism/packages/utilities/source"
+      ],
+      "@admin": [
+        "../../prism/packages/admin/source"
+      ],
+      "@authentication": [
+        "../../prism/packages/authentication/source"
+      ],
+      "@authentication/*": [
+        "../../prism/packages/authentication/source/*"
+      ],
+      "feature-flags": [
+        "../../prism/packages/feature-flags/source"
+      ]
+    }
+  },
+  "include": [
+    "next-env.d.ts",
+    "**/*.ts",
+    "**/*.tsx",
+    ".next/types/**/*.ts",
+    ".next/dev/types/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "../../prism/apps",
+    "../../prism/tools",
+    "../../prism/scripts",
+    "../../prism/packages/cli",
+    ".next",
+    "cli"
+  ]
+}

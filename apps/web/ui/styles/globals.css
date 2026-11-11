@@ -1,0 +1,7 @@
+/* Tailwind from app workspace; Prism theme from submodule (see ARCHITECTURE-Prism.md). */
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "../../../../prism/packages/ui/styles/globals-prism.css";
+
+@source "../**/*.{ts,tsx,js,jsx,mdx}";
+@source "../../app/**/*.{ts,tsx,js,jsx,mdx}";

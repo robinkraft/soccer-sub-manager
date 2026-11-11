@@ -1,0 +1,2 @@
+#!/usr/bin/env sh
+pnpm exec tsx prism/scripts/sync-commands.ts --quiet

@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+tmp=$(mktemp)
+grep -viE "^(Co-authored-by: Cursor|Made-with: Cursor)" "$1" > "$tmp" && mv "$tmp" "$1"

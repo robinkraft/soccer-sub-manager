@@ -1,0 +1,43 @@
+# soccer-sub-manager Documentation
+
+App docs for your Prism-powered Next.js app under **`apps/web/`**.
+
+## Repo layout (consumer workspace)
+
+```
+soccer-sub-manager/
+  prism/           # git submodule — Prism core docs at prism/docs/
+  apps/web/        # this app — edit code here
+  docs/            # ARCHITECTURE-*, CONVENTIONS-*, decisions/ (repo root)
+```
+
+## First-time setup
+
+From the **repo root** (not inside `prism/`):
+
+```bash
+git submodule update --init --recursive
+pnpm install
+# apps/web/.env is created from .env.example by prism generate — edit values there
+pnpm run db:push
+pnpm run dev
+```
+
+## Daily commands (repo root)
+
+| Task             | Command                                   |
+| ---------------- | ----------------------------------------- |
+| Dev server       | `pnpm run dev`                            |
+| Build            | `pnpm run build`                          |
+| Lint / typecheck | `pnpm run lint` / `pnpm run typecheck`    |
+| Database         | `pnpm run db:push` / `pnpm run db:studio` |
+| Align with Prism | `pnpm run prism:sync`                     |
+
+## Environment
+
+- **`.env.example`** — committed template (copy for reference)
+- **`.env`** — local secrets (gitignored); edit after generate
+
+## Prism docs
+
+See **`prism/docs/`** for UI, admin, database, deployment, and feature flags.

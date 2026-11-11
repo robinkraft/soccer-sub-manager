@@ -1,0 +1,17 @@
+{
+  "app": {
+    "nameIdentifier": "web",
+    "nameDisplay": "Web",
+    "description": "Prism web app template.",
+    "icon": "layers"
+  },
+  "authentication": {
+    "gateMode": "admin",
+    "signInPathDropOff": "/"
+  },
+  "deployments": {
+    "dev": {
+      "port": 3000
+    }
+  }
+}
