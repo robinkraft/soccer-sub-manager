@@ -486,27 +486,6 @@ function SetupScreen({ eng }: { eng: Engine }) {
             />
           </div>
         </Card>
-        <Card>
-          <div className="row spread">
-            <span>
-              <strong>Preferred lineup</strong>{" "}
-              <span className="muted">· {S.preferredLineup ? "Ready" : "Not set"}</span>
-            </span>
-            <PBtn
-              label="Manage"
-              small
-              onClick={() => {
-                eng.modal = { kind: "managePreferred" };
-                eng.emit();
-              }}
-            />
-          </div>
-          {S.lastLineup ? (
-            <div className="row" style={{ marginTop: 8 }}>
-              <PBtn label="Use last game’s lineup" onClick={() => eng.applyLastLineup()} />
-            </div>
-          ) : null}
-        </Card>
         <div className="row">
           <PBtn label="Refresh lineup" kind="primary" grow onClick={() => eng.autoRefreshLineup()} />
           <PBtn
@@ -537,6 +516,30 @@ function SetupScreen({ eng }: { eng: Engine }) {
         {!SB.rosterLoaded ? (
           <p className="muted small">Roster: sample roster</p>
         ) : null}
+        {/* Preferred lineup sits at the bottom of the setup screen
+            (Robin's call, 2026-11-11): he uses it least, and the top of
+            the screen should lead with the field and primary actions. */}
+        <Card>
+          <div className="row spread">
+            <span>
+              <strong>Preferred lineup</strong>{" "}
+              <span className="muted">· {S.preferredLineup ? "Ready" : "Not set"}</span>
+            </span>
+            <PBtn
+              label="Manage"
+              small
+              onClick={() => {
+                eng.modal = { kind: "managePreferred" };
+                eng.emit();
+              }}
+            />
+          </div>
+          {S.lastLineup ? (
+            <div className="row" style={{ marginTop: 8 }}>
+              <PBtn label="Use last game’s lineup" onClick={() => eng.applyLastLineup()} />
+            </div>
+          ) : null}
+        </Card>
       </>
     );
   } else if (S.setupTab === "roster") {

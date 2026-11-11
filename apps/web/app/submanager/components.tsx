@@ -53,16 +53,19 @@ const BTN_PRESET: Record<BtnKind, string> = {
   apply: "sm-apply",
 };
 
-// Mirrors the preset colours: PrismButtonProps types `color` as required
-// even though resolvePrismButtonPreset fills a default at runtime, so
-// PBtn must pass it explicitly. (Explicit props win over presets, so
-// these values are the effective colours.)
-const BTN_COLOR: Record<BtnKind, "blue" | "blue-grey" | "red" | "deep-orange"> = {
+// ONE BUTTON COLOUR — BLUE (Robin's pick, 2026-11-11). Every button in
+// the app is blue: solid blue for primary/apply/danger actions, blue
+// outline + light-blue text for secondary (default/ghost) actions.
+// Disabled buttons keep their blue fill faded by PrismButton's own
+// opacity (0.33) — never grey. The deep-orange Apply accent and the red
+// danger accent are retired from buttons; queue/swap badges keep their
+// existing amber/green/blue fills (those are state badges, not buttons).
+const BTN_COLOR: Record<BtnKind, "blue"> = {
   primary: "blue",
-  default: "blue-grey",
-  ghost: "blue-grey",
-  danger: "red",
-  apply: "deep-orange",
+  default: "blue",
+  ghost: "blue",
+  danger: "blue",
+  apply: "blue",
 };
 
 export function PBtn({
@@ -140,7 +143,7 @@ export function H2({ children }: { children: ReactNode }) {
       role="headline"
       size="small"
       as="h2"
-      className="mb-2 mt-[14px]"
+      className="mb-1 mt-2"
     >
       {children}
     </PrismTypography>
@@ -153,7 +156,7 @@ export function H3({ children }: { children: ReactNode }) {
       role="title"
       size="large"
       as="h3"
-      className="mb-[6px] mt-3"
+      className="mb-1 mt-2"
     >
       {children}
     </PrismTypography>
@@ -167,7 +170,7 @@ export function Muted({ children, center }: { children: ReactNode; center?: bool
       size="small"
       as="p"
       className={
-        "my-[6px] text-muted-foreground" + (center ? " text-center" : "")
+        "my-1 text-muted-foreground" + (center ? " text-center" : "")
       }
     >
       {children}
@@ -177,7 +180,7 @@ export function Muted({ children, center }: { children: ReactNode; center?: bool
 
 export function Card({ children }: { children: ReactNode }) {
   return (
-    <PrismCard className="my-2 gap-2 px-4 py-4">
+    <PrismCard className="my-1.5 gap-1.5 px-3 py-3">
       {children}
     </PrismCard>
   );
@@ -193,7 +196,7 @@ export function Tabs({
   onSelect: (k: string) => void;
 }) {
   return (
-    <div className="tabs mt-[6px] flex gap-[6px] rounded-[14px] bg-muted p-1" role="tablist">
+    <div className="tabs mt-1 flex gap-[6px] rounded-[14px] p-1" role="tablist">
       {tabs.map(([k, label]) => (
         <button
           key={k}
@@ -767,7 +770,7 @@ export function LoadingScreen() {
 export function AppShell({ children }: { children: ReactNode }) {
   return (
     <PrismLayoutMain className="mx-auto w-full max-w-[480px]">
-      <main id="main" aria-live="polite" className="px-[10px] pb-8 pt-2">
+      <main id="main" aria-live="polite" className="px-[10px] pb-6 pt-1">
         {children}
       </main>
     </PrismLayoutMain>
