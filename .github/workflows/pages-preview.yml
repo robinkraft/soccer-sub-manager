@@ -18,7 +18,7 @@
 #
 # HOW IT WORKS
 #   - Checks out main into ./main (the live app) and prism-redesign into
-#     ./preview, builds the redesign with PREVIEW_BASE_PATH=/preview/prism
+#     ./preview, builds the redesign with PREVIEW_BASE_PATH: /soccer-sub-manager/preview/prism
 #     (the Next.js app reads that env var into basePath in next.config.ts,
 #     so all /_next/* asset URLs are prefixed — without it the preview page
 #     would load but its JS/CSS would 404), then assembles ONE Pages
@@ -104,7 +104,7 @@ jobs:
       - name: Build preview (basePath /preview/prism)
         working-directory: preview
         env:
-          PREVIEW_BASE_PATH: /preview/prism
+          PREVIEW_BASE_PATH: /soccer-sub-manager/preview/prism
           NEXT_TELEMETRY_DISABLED: "1"
         run: pnpm --filter web run build
 
