@@ -4,8 +4,33 @@
 import { useState } from "react";
 import type { Engine } from "./engine";
 import { POSITIONS } from "./types";
-import { editGoalLabel, goalLabel } from "./logic";
+import { editGoalLabel, goalLabel, isSampleRoster } from "./logic";
 import { H2, Muted, PBtn } from "./components";
+
+/** Shown in place of a player grid when a signed-in coach's roster is
+    the fictional sample roster: the backend roster never loaded, and
+    showing Mia/Liam/Sofia as if they were the team would let the coach
+    record goals against fake players. Loud error + retry, never silent. */
+function RosterLoadError({ eng }: { eng: Engine }) {
+  return (
+    <div>
+      <p>
+        <strong>Roster could not be loaded.</strong>
+      </p>
+      <Muted>
+        You&apos;re signed in, but the real roster isn&apos;t available — the
+        sample team is showing instead. Check your connection and try again.
+      </Muted>
+      <div className="row" style={{ marginTop: 8 }}>
+        <PBtn
+          label="Retry loading roster"
+          kind="primary"
+          onClick={() => void eng.reloadRoster()}
+        />
+      </div>
+    </div>
+  );
+}
 
 function Sheet({
   eng,
@@ -110,24 +135,29 @@ export function ModalSheet({ eng }: { eng: Engine }) {
       .sort((a, b) => S.roster[a].name.localeCompare(S.roster[b].name));
     const half = Math.ceil(idx.length / 2);
     const colMajor = [...idx.slice(0, half), ...idx.slice(half)];
+    const rosterBroken = !!eng.SB.authUser && isSampleRoster(S.roster);
     return (
       <Sheet eng={eng} title="Who scored?">
         <Stepper eng={eng} />
         <Muted center>Goal minute — adjust before confirming.</Muted>
-        <div className="picker-grid">
-          {colMajor.map((i) => {
-            const p = S.lineup.indexOf(i);
-            return (
-              <button
-                key={i}
-                type="button"
-                onClick={() => eng.recordGoal(side, i)}
-              >
-                {S.roster[i].name} · {p >= 0 ? POSITIONS[p] : "Bench"}
-              </button>
-            );
-          })}
-        </div>
+        {rosterBroken ? (
+          <RosterLoadError eng={eng} />
+        ) : (
+          <div className="picker-grid">
+            {colMajor.map((i) => {
+              const p = S.lineup.indexOf(i);
+              return (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => eng.recordGoal(side, i)}
+                >
+                  {S.roster[i].name} · {p >= 0 ? POSITIONS[p] : "Bench"}
+                </button>
+              );
+            })}
+          </div>
+        )}
         <div className="pin-bottom">
           <PBtn label="Own goal" onClick={() => eng.recordGoal(side, -1)} />
           <PBtn label="Skip · no scorer" onClick={() => eng.recordGoal(side, "skip")} />
@@ -415,6 +445,14 @@ export function ModalSheet({ eng }: { eng: Engine }) {
     const addOppBtn = (
       <div className="row" style={{ marginBottom: 4 }}>
         <PBtn
+          label="Add goal"
+          onClick={() => {
+            eng.scorerMinute = Math.floor(S.elapsed / 60);
+            eng.modal = { kind: "addGoalLive" };
+            eng.emit();
+          }}
+        />
+        <PBtn
           label="Add opponent goal"
           onClick={() => {
             eng.scorerMinute = Math.floor(S.elapsed / 60);
@@ -529,6 +567,45 @@ export function ModalSheet({ eng }: { eng: Engine }) {
     );
   }
 
+  if (modal.kind === "addGoalLive") {
+    const idx = S.roster
+      .map((_, i) => i)
+      .filter((i) => S.roster[i].present)
+      .sort((a, b) => S.roster[a].name.localeCompare(S.roster[b].name));
+    const half = Math.ceil(idx.length / 2);
+    const colMajor = [...idx.slice(0, half), ...idx.slice(half)];
+    const rosterBroken = !!eng.SB.authUser && isSampleRoster(S.roster);
+    return (
+      <Sheet eng={eng} title="Add goal">
+        <Stepper eng={eng} />
+        <Muted center>Goal minute — adjust before confirming.</Muted>
+        {rosterBroken ? (
+          <RosterLoadError eng={eng} />
+        ) : (
+          <div className="picker-grid">
+            {colMajor.map((i) => {
+              const p = S.lineup.indexOf(i);
+              return (
+                <button
+                  key={i}
+                  type="button"
+                  onClick={() => eng.addGoalLive(i)}
+                >
+                  {S.roster[i].name} · {p >= 0 ? POSITIONS[p] : "Bench"}
+                </button>
+              );
+            })}
+          </div>
+        )}
+        <div className="pin-bottom">
+          <PBtn label="Own goal" onClick={() => eng.addGoalLive(-1)} />
+          <PBtn label="Skip · no scorer" onClick={() => eng.addGoalLive("skip")} />
+          <PBtn label="Cancel" kind="ghost" onClick={() => eng.closeModal()} />
+        </div>
+      </Sheet>
+    );
+  }
+
   if (modal.kind === "addOpponentGoalLive") {
     return (
       <Sheet eng={eng} title="Add opponent goal">
@@ -564,29 +641,34 @@ export function ModalSheet({ eng }: { eng: Engine }) {
 
   if (modal.kind === "assignLive") {
     const gi = modal.gi;
+    const rosterBroken = !!eng.SB.authUser && isSampleRoster(S.roster);
     return (
       <Sheet eng={eng} title="Assign scorer">
-        <div className="picker-grid">
-          {S.roster.map((r, i) => (
-            <button
-              key={i}
-              type="button"
-              onClick={() => {
-                const g = S.goals[gi];
-                if (g) {
-                  g.player = i;
-                  g.player_name = S.roster[i].name;
-                  // A corrected goal is no longer a fresh live moment.
-                  g.liveMoment = false;
-                }
-                eng.modal = { kind: "editGoalsLive" };
-                eng.emit(true);
-              }}
-            >
-              {r.name}
-            </button>
-          ))}
-        </div>
+        {rosterBroken ? (
+          <RosterLoadError eng={eng} />
+        ) : (
+          <div className="picker-grid">
+            {S.roster.map((r, i) => (
+              <button
+                key={i}
+                type="button"
+                onClick={() => {
+                  const g = S.goals[gi];
+                  if (g) {
+                    g.player = i;
+                    g.player_name = S.roster[i].name;
+                    // A corrected goal is no longer a fresh live moment.
+                    g.liveMoment = false;
+                  }
+                  eng.modal = { kind: "editGoalsLive" };
+                  eng.emit(true);
+                }}
+              >
+                {r.name}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="pin-bottom">
           <PBtn
             label="Own goal"
@@ -612,30 +694,35 @@ export function ModalSheet({ eng }: { eng: Engine }) {
     const { hi, gi } = modal;
     const h = S.history[hi];
     if (!h) return null;
+    const rosterBroken = !!eng.SB.authUser && isSampleRoster(S.roster);
     return (
       <Sheet eng={eng} title="Assign scorer">
-        <div className="picker-grid">
-          {S.roster.map((r, i) => (
-            <button
-              key={i}
-              type="button"
-              onClick={() => {
-                const g = h.goals[gi];
-                if (g) {
-                  const idx = (h.players || []).findIndex(
-                    (p) => p.name === S.roster[i].name,
-                  );
-                  g.player = idx === -1 ? null : idx;
-                  g.player_name = S.roster[i].name;
-                }
-                void eng.syncHistoryGame(h);
-                eng.closeModal();
-              }}
-            >
-              {r.name}
-            </button>
-          ))}
-        </div>
+        {rosterBroken ? (
+          <RosterLoadError eng={eng} />
+        ) : (
+          <div className="picker-grid">
+            {S.roster.map((r, i) => (
+              <button
+                key={i}
+                type="button"
+                onClick={() => {
+                  const g = h.goals[gi];
+                  if (g) {
+                    const idx = (h.players || []).findIndex(
+                      (p) => p.name === S.roster[i].name,
+                    );
+                    g.player = idx === -1 ? null : idx;
+                    g.player_name = S.roster[i].name;
+                  }
+                  void eng.syncHistoryGame(h);
+                  eng.closeModal();
+                }}
+              >
+                {r.name}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="pin-bottom">
           <PBtn
             label="Own goal"
@@ -659,32 +746,29 @@ export function ModalSheet({ eng }: { eng: Engine }) {
     const hi = modal.hi;
     const h = S.history[hi];
     if (!h) return null;
+    const rosterBroken = !!eng.SB.authUser && isSampleRoster(S.roster);
     return (
       <Sheet eng={eng} title="Add goal — backfill">
         <Muted>Minute is optional; leave it blank for “name only”.</Muted>
-        <div className="picker-grid">
-          {S.roster.map((r, i) => (
-            <button
-              key={i}
-              type="button"
-              onClick={() => {
-                h.goals.push({ player: i, seconds: null, side: "us" });
-                void eng.syncHistoryGame(h);
-                eng.closeModal();
-              }}
-            >
-              {r.name}
-            </button>
-          ))}
-        </div>
+        {rosterBroken ? (
+          <RosterLoadError eng={eng} />
+        ) : (
+          <div className="picker-grid">
+            {S.roster.map((r, i) => (
+              <button
+                key={i}
+                type="button"
+                onClick={() => eng.addGoalPast(hi, i)}
+              >
+                {r.name}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="pin-bottom">
           <PBtn
             label="Own goal"
-            onClick={() => {
-              h.goals.push({ player: -1, seconds: null, side: "us" });
-              void eng.syncHistoryGame(h);
-              eng.closeModal();
-            }}
+            onClick={() => eng.addGoalPast(hi, -1)}
           />
           <PBtn label="Cancel" kind="ghost" onClick={() => eng.closeModal()} />
         </div>
@@ -698,10 +782,12 @@ export function ModalSheet({ eng }: { eng: Engine }) {
 function Stepper({ eng }: { eng: Engine }) {
   const [, setTick] = useState(0);
   const step = (d: number) => {
-    eng.scorerMinute = Math.max(
-      0,
-      Math.min(eng.S.settings.matchMinutes, eng.scorerMinute + d),
-    );
+    // Upper bound is a generous 120, NOT matchMinutes: the opener sets the
+    // minute to the current/final minute, which is already AT matchMinutes
+    // for a full-length past game (or a game into overtime) — clamping to
+    // matchMinutes made + a no-op exactly then, so the stepper looked
+    // dead. A youth game never runs 2 hours; the cap only stops runaway taps.
+    eng.scorerMinute = Math.max(0, Math.min(120, eng.scorerMinute + d));
     setTick((t) => t + 1);
   };
   return (

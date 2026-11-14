@@ -3,12 +3,25 @@
 // All functions take the app state explicitly; no Supabase, no DOM.
 
 import {
+  DEFAULT_ROSTER,
   POSITIONS,
   TEAM_DEFAULT,
   type AppState,
   type Goal,
   type HistoryGame,
 } from "./types";
+
+/** True when the roster in use is exactly the fictional sample roster
+    (same 13 names, same order). A signed-in coach's real roster is never
+    this list, so an exact match under a coach session means the backend
+    roster never loaded — the app must never show these names as if they
+    were the team. */
+export function isSampleRoster(roster: { name: string }[]): boolean {
+  return (
+    roster.length === DEFAULT_ROSTER.length &&
+    roster.every((r, i) => r.name === DEFAULT_ROSTER[i].name)
+  );
+}
 
 export function fmtClock(sec: number): string {
   sec = Math.max(0, Math.round(sec));

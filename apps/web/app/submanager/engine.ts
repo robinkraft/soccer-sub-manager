@@ -26,6 +26,7 @@ import {
   emptySpotsLabel,
   fmtClock,
   internalGameFromRow,
+  isSampleRoster,
   liveGkSec,
   livePosSecAll,
   onField,
@@ -92,6 +93,7 @@ export type ModalState =
   | { kind: "editGoalsPast"; hi: number }
   | { kind: "addOpponentGoalLive" }
   | { kind: "addOpponentGoalPast"; hi: number }
+  | { kind: "addGoalLive" }
   | { kind: "assignLive"; gi: number }
   | { kind: "assignHist"; hi: number; gi: number }
   | { kind: "backfill"; hi: number }
@@ -696,6 +698,11 @@ export class Engine {
       SB.rosterError = "Roster could not be loaded.";
       return false;
     }
+  }
+
+  async reloadRoster(): Promise<void> {
+    await this.loadRoster();
+    this.emit();
   }
 
   async saveRosterToBackend(): Promise<boolean> {
@@ -1758,12 +1765,17 @@ export class Engine {
       this.emit();
       return;
     }
+    // Load the backend roster FIRST, before any deep-link routing: a coach
+    // opening ?game= used to route straight into the live game without the
+    // roster ever loading, and the live game's stored roster then governed
+    // every picker. (The live state's own roster still wins inside the
+    // game itself — it is index-coupled to lineup/minutes/goals.)
+    if (SB.configured && SB.authUser) await this.loadRoster();
     if (SB.configured) {
       const routed = await this.routeFromUrl();
       if (routed) return;
     }
     if (this.S.screen === "loading") this.S.screen = "setup";
-    if (SB.configured && SB.authUser) await this.loadRoster();
     if (SB.configured) await this.loadHistory();
     this.emit();
   }
@@ -1845,9 +1857,24 @@ export class Engine {
   leaveLiveGame(): void {
     this.unsubscribeLive();
     this.resetLiveSession();
+    // Keep the roster (and team name) across the reset for a signed-in
+    // coach: freshState() carries the fictional sample roster, and
+    // leaving a game used to leave the coach on the sample team — the
+    // next game started then persisted the sample roster into Supabase.
+    // Viewers/anonymous keep the sample roster, as before.
+    const keepRoster = this.S.roster;
+    const keepTeam = this.S.teamName;
+    const wasCoach = !!this.SB.authUser;
     this.S = freshState();
     this.SB.historyLoaded = false;
     this.SB.historyError = "";
+    if (wasCoach) {
+      this.S.roster = keepRoster;
+      this.S.teamName = keepTeam;
+      this.resizeMinuteArrays();
+      void this.loadRoster();
+      void this.loadHistory();
+    }
     this.emit();
   }
 
@@ -1864,8 +1891,23 @@ export class Engine {
     this.emit();
   }
 
-  startGame(): void {
+  async startGame(): Promise<void> {
     const S = this.S;
+    // Never start (and persist) a live game on the sample roster while
+    // signed in: the stored live state is index-coupled to its roster,
+    // so a sample roster baked into a live game poisons every picker in
+    // it. Retry the backend load once; refuse with an explicit error
+    // rather than writing fake players into Supabase.
+    if (this.SB.authUser && isSampleRoster(S.roster)) {
+      await this.loadRoster();
+      if (isSampleRoster(this.S.roster)) {
+        S.error =
+          "Roster could not be loaded — the sample team is showing. Check your connection and try again.";
+        S.screen = "review";
+        this.emit();
+        return;
+      }
+    }
     const empty = emptySpotsLabel(S);
     if (empty) {
       S.error = "Fill " + empty + " to start.";
@@ -2254,6 +2296,23 @@ export class Engine {
     this.emit(true);
   }
 
+  /** Add a US goal from the live Edit goals sheet. Same storage shape as
+      a live US + (chosen player, chosen minute) but a correction, not a
+      live moment: no celebration, no liveMoment flag. The score moves
+      exactly as it does for a live US +. Undo restores the score. */
+  addGoalLive(player: number | "skip"): void {
+    const S = this.S;
+    this.pushUndo("add goal");
+    S.goals.push({
+      player: player === "skip" ? null : player,
+      seconds: this.scorerMinute * 60,
+      side: "us",
+    });
+    S.ourScore += 1;
+    this.modal = { kind: "editGoalsLive" };
+    this.emit(true);
+  }
+
   /** Add an opponent goal from the live Edit goals sheet. Same storage
       shape as a live THEM + (player null, chosen minute); the score moves
       exactly as it does for a live THEM +. No celebration — corrections
@@ -2269,6 +2328,18 @@ export class Engine {
     S.theirScore += 1;
     this.modal = { kind: "editGoalsLive" };
     this.emit(true);
+  }
+
+  /** Add a US goal to a past game from its Edit goals sheet (backfill).
+      Minute is optional (null = name only). The score moves — a backfilled
+      goal is a goal — and persists with the game. */
+  addGoalPast(hi: number, player: number): void {
+    const h = this.S.history[hi];
+    if (!h) return;
+    h.goals.push({ player, seconds: null, side: "us" });
+    h.ourScore += 1;
+    void this.syncHistoryGame(h);
+    this.closeModal();
   }
 
   /** Add an opponent goal to a past game from its Edit goals sheet.
@@ -2304,9 +2375,9 @@ export class Engine {
     this.emit();
   }
 
-  /** Remove a goal from a past game's Edit goals sheet. Opponent goals
-      move the score back down; US goals keep the existing behaviour
-      (score untouched — pre-existing, out of scope for this change). */
+  /** Remove a goal from a past game's Edit goals sheet. The score always
+      stays consistent with the goal list: removing a US goal moves
+      our_score down, removing an opponent goal moves their_score down. */
   removeGoalPast(hi: number, gi: number): void {
     const h = this.S.history[hi];
     if (!h) return;
@@ -2314,6 +2385,7 @@ export class Engine {
     if (!g) return;
     if ((g.side || "us") === "them")
       h.theirScore = Math.max(0, h.theirScore - 1);
+    else h.ourScore = Math.max(0, h.ourScore - 1);
     h.goals.splice(gi, 1);
     void this.syncHistoryGame(h);
     this.closeModal();

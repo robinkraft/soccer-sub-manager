@@ -210,6 +210,7 @@ export default function Home() {
         </div>
       ) : null}
       {eng.celebration &&
+      !eng.modal &&
       (S.screen === "live" || S.screen === "halftime") ? (
         <div
           className="goal-celebration"
@@ -784,7 +785,7 @@ function ReviewScreen({ eng }: { eng: Engine }) {
           grow
           icon={Play}
           disabled={!!empty}
-          onClick={() => eng.startGame()}
+          onClick={() => void eng.startGame()}
         />
         <PBtn label="Back to setup" onClick={() => eng.backToSetup()} />
       </div>
