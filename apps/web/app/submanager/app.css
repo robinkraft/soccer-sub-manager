@@ -221,3 +221,11 @@ button.xs{min-height:32px;padding:2px 9px;font-size:13px;border-radius:9999px;fl
 /* Live-update toast */
 .live-toast{position:fixed;top:10px;left:50%;transform:translateX(-50%) translateY(-6px);background:var(--green-dark);color:var(--green-bg);border:1px solid #4caf50;border-radius:999px;padding:6px 14px;font-size:13px;font-weight:800;letter-spacing:.2px;opacity:0;pointer-events:none;transition:opacity .35s ease,transform .35s ease;z-index:60;white-space:nowrap}
 .live-toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* Goal celebration banner — big, joyful, never blocks: auto-dismisses, tap dismisses */
+.goal-celebration{position:fixed;left:50%;top:16%;transform:translateX(-50%);z-index:70;width:min(92vw,420px);text-align:center;background:linear-gradient(135deg,#ffd54f,#ffb300);color:#1a1a1a;border-radius:16px;padding:20px 16px 14px;box-shadow:0 8px 32px rgba(0,0,0,.45);cursor:pointer;animation:goal-pop .35s ease-out}
+.goal-celebration-emoji{font-size:40px;line-height:1}
+.goal-celebration-title{font-size:30px;font-weight:800;line-height:1.15;margin-top:6px}
+.goal-celebration-minute{font-size:20px;font-weight:700;margin-top:2px}
+.goal-celebration-hint{font-size:12px;font-weight:700;opacity:.6;margin-top:8px}
+@keyframes goal-pop{from{transform:translateX(-50%) scale(.85);opacity:0}to{transform:translateX(-50%) scale(1);opacity:1}}

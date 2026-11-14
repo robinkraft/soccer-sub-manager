@@ -209,6 +209,23 @@ export default function Home() {
           {eng.toast}
         </div>
       ) : null}
+      {eng.celebration &&
+      (S.screen === "live" || S.screen === "halftime") ? (
+        <div
+          className="goal-celebration"
+          role="status"
+          onClick={() => eng.dismissCelebration()}
+        >
+          <div className="goal-celebration-emoji" aria-hidden="true">
+            ⚽
+          </div>
+          <div className="goal-celebration-title">{eng.celebration.title}</div>
+          {eng.celebration.minute ? (
+            <div className="goal-celebration-minute">{eng.celebration.minute}</div>
+          ) : null}
+          <div className="goal-celebration-hint">Tap to dismiss</div>
+        </div>
+      ) : null}
     </AppShell>
   );
 }

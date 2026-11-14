@@ -158,6 +158,20 @@ export function goalLabel(
   return name + min;
 }
 
+/** Label for a goal inside the Edit goals sheets — the one place opponent
+    goals are listed. Opponent goals read "Opponent — 23'". */
+export function editGoalLabel(
+  g: Goal,
+  players: { name: string }[],
+): string {
+  if ((g.side || "us") === "them") {
+    return g.seconds == null
+      ? "Opponent"
+      : "Opponent — " + Math.floor(g.seconds / 60) + "'";
+  }
+  return goalLabel(g, players);
+}
+
 /** Unknown-scorer THEM goals are never listed anywhere. */
 export function displayGoals(goals: Goal[] | undefined | null): Goal[] {
   return (goals || []).filter(

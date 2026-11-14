@@ -19,6 +19,10 @@ export interface Goal {
   seconds: number | null;
   side: "us" | "them";
   player_name?: string;
+  /** True only when recorded as a live moment (scorer picker / THEM +).
+      Edit-goals corrections clear it, so a remote client never celebrates
+      a correction. Never stored in history rows. */
+  liveMoment?: boolean;
 }
 
 export interface GamePlayer {

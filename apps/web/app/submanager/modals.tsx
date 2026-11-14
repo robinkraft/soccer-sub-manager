@@ -4,7 +4,7 @@
 import { useState } from "react";
 import type { Engine } from "./engine";
 import { POSITIONS } from "./types";
-import { displayGoals, goalLabel } from "./logic";
+import { editGoalLabel, goalLabel } from "./logic";
 import { H2, Muted, PBtn } from "./components";
 
 function Sheet({
@@ -366,14 +366,16 @@ export function ModalSheet({ eng }: { eng: Engine }) {
 
   if (modal.kind === "editGoalsLive") {
     const rows = S.goals.map((g, gi) => {
-      if (g.player == null && (g.side || "us") === "them") return null;
+      const isThem = (g.side || "us") === "them";
       return (
         <div className="mrow" key={gi}>
           <span className="name">
-            {goalLabel(g, S.roster)} ({g.side === "us" ? "US" : "THEM"})
+            {isThem
+              ? editGoalLabel(g, S.roster)
+              : goalLabel(g, S.roster) + " (US)"}
           </span>
           <span className="nums">
-            {g.player == null ? (
+            {g.player == null && !isThem ? (
               <button
                 type="button"
                 className="small"
@@ -410,10 +412,23 @@ export function ModalSheet({ eng }: { eng: Engine }) {
         </div>
       );
     });
-    if (!displayGoals(S.goals).length) {
+    const addOppBtn = (
+      <div className="row" style={{ marginBottom: 4 }}>
+        <PBtn
+          label="Add opponent goal"
+          onClick={() => {
+            eng.scorerMinute = Math.floor(S.elapsed / 60);
+            eng.modal = { kind: "addOpponentGoalLive" };
+            eng.emit();
+          }}
+        />
+      </div>
+    );
+    if (!S.goals.length) {
       return (
         <Sheet eng={eng} title="Edit goals">
           <p>No goals recorded yet in this game.</p>
+          {addOppBtn}
           <div className="pin-bottom">
             <PBtn label="Close" kind="ghost" onClick={() => eng.closeModal()} />
           </div>
@@ -422,6 +437,7 @@ export function ModalSheet({ eng }: { eng: Engine }) {
     }
     return (
       <Sheet eng={eng} title="Edit goals — live game">
+        {addOppBtn}
         {rows}
         <div className="pin-bottom">
           <PBtn label="Done" kind="ghost" onClick={() => eng.closeModal()} />
@@ -445,13 +461,27 @@ export function ModalSheet({ eng }: { eng: Engine }) {
               eng.emit();
             }}
           />
+          <PBtn
+            label="Add opponent goal"
+            onClick={() => {
+              const mm = h.matchMinutes || 50;
+              eng.scorerMinute = Math.min(
+                mm,
+                Math.floor((h.playedSeconds || 0) / 60),
+              );
+              eng.modal = { kind: "addOpponentGoalPast", hi };
+              eng.emit();
+            }}
+          />
         </div>
         {h.goals.map((g, gi) => {
-          if (g.player == null && (g.side || "us") === "them") return null;
+          const isThem = (g.side || "us") === "them";
           return (
             <div className="mrow" key={gi}>
-              <span className="name">{goalLabel(g, h.players)}</span>
-              {g.player == null ? (
+              <span className="name">
+                {isThem ? editGoalLabel(g, h.players) : goalLabel(g, h.players)}
+              </span>
+              {g.player == null && !isThem ? (
                 <button
                   type="button"
                   className="small"
@@ -463,14 +493,28 @@ export function ModalSheet({ eng }: { eng: Engine }) {
                   Assign…
                 </button>
               ) : null}
+              {isThem ? (
+                <>
+                  <button
+                    type="button"
+                    className="small"
+                    onClick={() => eng.goalMinuteAdjustPast(hi, gi, -1)}
+                  >
+                    −1′
+                  </button>{" "}
+                  <button
+                    type="button"
+                    className="small"
+                    onClick={() => eng.goalMinuteAdjustPast(hi, gi, 1)}
+                  >
+                    +1′
+                  </button>{" "}
+                </>
+              ) : null}
               <button
                 type="button"
                 className="small danger"
-                onClick={() => {
-                  h.goals.splice(gi, 1);
-                  void eng.syncHistoryGame(h);
-                  eng.closeModal();
-                }}
+                onClick={() => eng.removeGoalPast(hi, gi)}
               >
                 Remove
               </button>
@@ -480,6 +524,39 @@ export function ModalSheet({ eng }: { eng: Engine }) {
         {!h.goals.length ? <Muted>No goals yet.</Muted> : null}
         <div className="pin-bottom">
           <PBtn label="Done" kind="ghost" onClick={() => eng.closeModal()} />
+        </div>
+      </Sheet>
+    );
+  }
+
+  if (modal.kind === "addOpponentGoalLive") {
+    return (
+      <Sheet eng={eng} title="Add opponent goal">
+        <Stepper eng={eng} />
+        <Muted center>Opponent goal minute — adjust before confirming.</Muted>
+        <div className="pin-bottom">
+          <PBtn
+            label="Add opponent goal"
+            onClick={() => eng.addOpponentGoalLive()}
+          />
+          <PBtn label="Cancel" kind="ghost" onClick={() => eng.closeModal()} />
+        </div>
+      </Sheet>
+    );
+  }
+
+  if (modal.kind === "addOpponentGoalPast") {
+    const hi = modal.hi;
+    return (
+      <Sheet eng={eng} title="Add opponent goal">
+        <Stepper eng={eng} />
+        <Muted center>Opponent goal minute — adjust before confirming.</Muted>
+        <div className="pin-bottom">
+          <PBtn
+            label="Add opponent goal"
+            onClick={() => eng.addOpponentGoalPast(hi)}
+          />
+          <PBtn label="Cancel" kind="ghost" onClick={() => eng.closeModal()} />
         </div>
       </Sheet>
     );
@@ -499,6 +576,8 @@ export function ModalSheet({ eng }: { eng: Engine }) {
                 if (g) {
                   g.player = i;
                   g.player_name = S.roster[i].name;
+                  // A corrected goal is no longer a fresh live moment.
+                  g.liveMoment = false;
                 }
                 eng.modal = { kind: "editGoalsLive" };
                 eng.emit(true);
@@ -516,6 +595,8 @@ export function ModalSheet({ eng }: { eng: Engine }) {
               if (g) {
                 g.player = -1;
                 g.player_name = "Own goal";
+                // A corrected goal is no longer a fresh live moment.
+                g.liveMoment = false;
               }
               eng.modal = { kind: "editGoalsLive" };
               eng.emit(true);

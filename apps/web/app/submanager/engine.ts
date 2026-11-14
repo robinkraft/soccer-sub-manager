@@ -90,6 +90,8 @@ export type ModalState =
   | { kind: "short" }
   | { kind: "editGoalsLive" }
   | { kind: "editGoalsPast"; hi: number }
+  | { kind: "addOpponentGoalLive" }
+  | { kind: "addOpponentGoalPast"; hi: number }
   | { kind: "assignLive"; gi: number }
   | { kind: "assignHist"; hi: number; gi: number }
   | { kind: "backfill"; hi: number }
@@ -121,6 +123,11 @@ export class Engine {
   confirmFn: (() => void) | null = null;
   scorerMinute = 0;
   toast: string | null = null;
+  /** Goal celebration banner (local-only, never synced): { title, minute }. */
+  celebration: { title: string; minute: string } | null = null;
+  /** Occurrence-counted keys of goals already celebrated (or seeded on load). */
+  private celebratedGoalKeys = new Set<string>();
+  private celebrationTimer: ReturnType<typeof setTimeout> | null = null;
   booted = false;
   initialized = false;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -321,6 +328,63 @@ export class Engine {
       this.toast = null;
       this.emit();
     }, 2500);
+  }
+
+  /* ---------- Goal celebration ---------- */
+
+  /** Occurrence-counted keys for a goals list, so two identical goals in
+      the same minute (same scorer, same minute) stay distinct, and
+      removing one goal never re-keys the others. */
+  goalKeys(goals: Goal[]): string[] {
+    const seen = new Map<string, number>();
+    return (goals || []).map((g) => {
+      const base =
+        (g.side || "us") + ":" + String(g.player) + ":" + String(g.seconds);
+      const n = (seen.get(base) || 0) + 1;
+      seen.set(base, n);
+      return base + "#" + n;
+    });
+  }
+
+  celebrationFor(g: Goal): { title: string; minute: string } {
+    const minute = g.seconds == null ? "" : Math.floor(g.seconds / 60) + "′";
+    if ((g.side || "us") === "them") return { title: "Opponent scores!", minute };
+    let name: string;
+    if (g.player === -1) name = "Own goal";
+    else if (g.player == null) name = "Unknown scorer";
+    else name = this.S.roster[g.player] ? this.S.roster[g.player].name : "?";
+    return { title: name + " scores!", minute };
+  }
+
+  /** Show the celebration for one goal — only while watching a live game
+      (coach live/halftime, or a viewer on the game). Auto-dismisses after
+      a few seconds; tap dismisses. Only recordGoal and remote live
+      updates call this; Edit-goals corrections never do. */
+  celebrateGoal(g: Goal): void {
+    const S = this.S;
+    if (S.screen !== "live" && S.screen !== "halftime") return;
+    this.celebration = this.celebrationFor(g);
+    this.emit();
+    if (this.celebrationTimer) clearTimeout(this.celebrationTimer);
+    this.celebrationTimer = setTimeout(() => {
+      this.celebration = null;
+      this.emit();
+    }, 4000);
+  }
+
+  dismissCelebration(): void {
+    if (this.celebrationTimer) clearTimeout(this.celebrationTimer);
+    this.celebrationTimer = null;
+    this.celebration = null;
+    this.emit();
+  }
+
+  /** Mark a just-recorded goal as celebrated and show it. */
+  celebrateNewGoal(g: Goal): void {
+    const keys = this.goalKeys(this.S.goals);
+    const idx = this.S.goals.indexOf(g);
+    if (idx >= 0) this.celebratedGoalKeys.add(keys[idx]);
+    this.celebrateGoal(g);
   }
 
   async requestWakeLock(): Promise<void> {
@@ -780,6 +844,8 @@ export class Engine {
       const { error } = await this.SB.client
         .from("game_history")
         .update({
+          our_score: h.ourScore,
+          their_score: h.theirScore,
           goals: backendGoalsFromGame(
             h,
             this.S.roster.map((r) => r.name),
@@ -834,7 +900,16 @@ export class Engine {
     };
   }
 
-  applyLiveState(st: Record<string, unknown>): void {
+  /**
+   * Apply a live-game state received from Supabase (join, poll, Realtime).
+   * With { seed: true } (loading a game) every goal already in the state
+   * is silently marked celebrated, so joining mid-game never celebrates
+   * old goals. On a live update, any goal not yet celebrated — and only
+   * one recorded as a live moment — celebrates once, here and on every
+   * other watcher; corrections via Edit goals carry no liveMoment flag
+   * and never celebrate.
+   */
+  applyLiveState(st: Record<string, unknown>, opts?: { seed?: boolean }): void {
     if (!st || typeof st !== "object") return;
     const S = this.S;
     const SB = this.SB;
@@ -924,6 +999,20 @@ export class Engine {
       } else {
         S.stints = Array(n).fill(null);
         if (S.running) this.openStints();
+      }
+      // Goal celebrations for goals that arrived with this state.
+      const keys = this.goalKeys(S.goals);
+      if (opts && opts.seed) {
+        keys.forEach((k) => this.celebratedGoalKeys.add(k));
+      } else {
+        let newest: Goal | null = null;
+        S.goals.forEach((g, gi) => {
+          if (!this.celebratedGoalKeys.has(keys[gi])) {
+            this.celebratedGoalKeys.add(keys[gi]);
+            if (g.liveMoment) newest = g;
+          }
+        });
+        if (newest) this.celebrateGoal(newest);
       }
     } finally {
       SB.applyingRemote = false;
@@ -1162,7 +1251,7 @@ export class Engine {
       SB.role = "driver";
       SB.offline = false;
       SB.viewerMode = false;
-      this.applyLiveState(data.state as Record<string, unknown>);
+      this.applyLiveState(data.state as Record<string, unknown>, { seed: true });
       SB.rosterFromLive = true;
       SB.rosterFromBackend = false;
       if (data.phase === "halftime") this.S.screen = "halftime";
@@ -1252,6 +1341,10 @@ export class Engine {
 
   resetLiveSession(): void {
     this.unsubscribeLive();
+    if (this.celebrationTimer) clearTimeout(this.celebrationTimer);
+    this.celebrationTimer = null;
+    this.celebration = null;
+    this.celebratedGoalKeys.clear();
     if (this.SB.viewerTimer) {
       clearInterval(this.SB.viewerTimer);
       this.SB.viewerTimer = null;
@@ -1337,7 +1430,7 @@ export class Engine {
       SB.liveCode = live.game_code as string;
       SB.liveVersion = live.version as number;
       SB.role = "driver";
-      this.applyLiveState(live.state as Record<string, unknown>);
+      this.applyLiveState(live.state as Record<string, unknown>, { seed: true });
       SB.rosterFromLive = true;
       SB.rosterFromBackend = false;
       if (live.phase === "halftime") this.S.screen = "halftime";
@@ -1369,7 +1462,7 @@ export class Engine {
     SB.liveCode = live.game_code as string;
     SB.liveVersion = live.version as number;
     SB.role = SB.authUser ? "driver" : "viewer";
-    this.applyLiveState(live.state as Record<string, unknown>);
+    this.applyLiveState(live.state as Record<string, unknown>, { seed: true });
     SB.rosterFromLive = true;
     SB.rosterFromBackend = false;
     if (live.phase === "halftime") this.S.screen = "halftime";
@@ -1579,7 +1672,7 @@ export class Engine {
     SB.role = "driver";
     SB.offline = false;
     SB.viewerMode = false;
-    this.applyLiveState((row.state as Record<string, unknown>) || {});
+    this.applyLiveState((row.state as Record<string, unknown>) || {}, { seed: true });
     SB.rosterFromLive = true;
     SB.rosterFromBackend = false;
     if (row.phase === "halftime") this.S.screen = "halftime";
@@ -1798,6 +1891,8 @@ export class Engine {
     S.halftimeDone = false;
     S.plannedLineup = null;
     S.startingLineup = [...S.lineup];
+    this.celebratedGoalKeys.clear();
+    this.celebration = null;
     this.openStints();
     this.emit();
     void this.startLiveDriver();
@@ -1805,6 +1900,7 @@ export class Engine {
 
   async finishGame(): Promise<void> {
     this.pauseClock();
+    this.celebration = null;
     const S = this.S;
     const players = S.roster.map((r, i) => ({
       name: r.name,
@@ -2058,13 +2154,16 @@ export class Engine {
   recordGoal(side: "us" | "them", player: number | "skip"): void {
     const S = this.S;
     this.pushUndo("goal");
-    S.goals.push({
+    const goal: Goal = {
       player: player === "skip" ? null : player,
       seconds: this.scorerMinute * 60,
       side,
-    });
+      liveMoment: true,
+    };
+    S.goals.push(goal);
     if (side === "us") S.ourScore += 1;
     else S.theirScore += 1;
+    this.celebrateNewGoal(goal);
     this.modal = null;
     this.emit(true);
   }
@@ -2136,6 +2235,9 @@ export class Engine {
       0,
       Math.min(S.settings.matchMinutes * 60, cur + delta * 60),
     );
+    // A corrected goal is no longer a fresh live moment — a remote client
+    // must not celebrate it when the correction syncs.
+    g.liveMoment = false;
     this.modal = { kind: "editGoalsLive" };
     this.emit(true);
   }
@@ -2150,6 +2252,71 @@ export class Engine {
     S.goals.splice(gi, 1);
     this.modal = { kind: "editGoalsLive" };
     this.emit(true);
+  }
+
+  /** Add an opponent goal from the live Edit goals sheet. Same storage
+      shape as a live THEM + (player null, chosen minute); the score moves
+      exactly as it does for a live THEM +. No celebration — corrections
+      are not live moments. */
+  addOpponentGoalLive(): void {
+    const S = this.S;
+    this.pushUndo("add opponent goal");
+    S.goals.push({
+      player: null,
+      seconds: this.scorerMinute * 60,
+      side: "them",
+    });
+    S.theirScore += 1;
+    this.modal = { kind: "editGoalsLive" };
+    this.emit(true);
+  }
+
+  /** Add an opponent goal to a past game from its Edit goals sheet.
+      Default minute is the game's final minute (set by the caller on
+      scorerMinute); the score moves and persists with the game. */
+  addOpponentGoalPast(hi: number): void {
+    const h = this.S.history[hi];
+    if (!h) return;
+    h.goals.push({
+      player: null,
+      seconds: this.scorerMinute * 60,
+      side: "them",
+    });
+    h.theirScore += 1;
+    void this.syncHistoryGame(h);
+    this.modal = { kind: "editGoalsPast", hi };
+    this.emit();
+  }
+
+  /** Adjust a past game's opponent-goal minute from its Edit goals sheet. */
+  goalMinuteAdjustPast(hi: number, gi: number, delta: number): void {
+    const h = this.S.history[hi];
+    if (!h) return;
+    const g = h.goals[gi];
+    if (!g) return;
+    const cur = g.seconds == null ? 0 : g.seconds;
+    g.seconds = Math.max(
+      0,
+      Math.min((h.matchMinutes || 50) * 60, cur + delta * 60),
+    );
+    void this.syncHistoryGame(h);
+    this.modal = { kind: "editGoalsPast", hi };
+    this.emit();
+  }
+
+  /** Remove a goal from a past game's Edit goals sheet. Opponent goals
+      move the score back down; US goals keep the existing behaviour
+      (score untouched — pre-existing, out of scope for this change). */
+  removeGoalPast(hi: number, gi: number): void {
+    const h = this.S.history[hi];
+    if (!h) return;
+    const g = h.goals[gi];
+    if (!g) return;
+    if ((g.side || "us") === "them")
+      h.theirScore = Math.max(0, h.theirScore - 1);
+    h.goals.splice(gi, 1);
+    void this.syncHistoryGame(h);
+    this.closeModal();
   }
 
   /* ---------- Roster actions ---------- */
