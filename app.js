@@ -157,6 +157,12 @@ const SB = {
   viewerMode: false, viewerTimer: null, viewerHistoryJson: '', viewerJoinedCode: '',
   viewerLives: [], // live games returned by viewer_access for this code
   viewerPollFails: 0, // consecutive viewer_access poll failures (see refreshViewer)
+  // Demo / test mode (no sign-in, sample roster): entered from the
+  // entry screen. In-memory only — every Supabase-touching function
+  // returns early while this is set, so a demo session makes zero
+  // backend calls and can never create a live game, write history,
+  // or touch the real roster. Leaving demo discards it.
+  demo: false,
   // Share code the coach generated (Settings → Share a view link).
   viewerCode: '', viewerCodeLoaded: false, viewerCodeLoading: false,
   // Active live games, for the "there's a live game" note on setup:
@@ -211,6 +217,7 @@ function initBackend() {
    and cleared on Sign out — a coach stays signed in across reloads.
    Game/history data is never stored in browser storage. */
 async function checkAuthSession() {
+  if (SB.demo) { SB.authChecked = true; return null; } // demo never checks a session
   if (!SB.configured || !SB.client) { SB.authChecked = true; return null; }
   try {
     const { data, error } = await SB.client.auth.getSession();
@@ -243,7 +250,9 @@ async function checkAuthSession() {
 function authGated() {
   // Login screen applies only when Supabase is configured. Without a
   // config the app is in-memory only, exactly as before, with no login.
-  return SB.configured && SB.authChecked && !SB.authUser;
+  // Demo mode also bypasses the gate: it runs on the sample roster
+  // with no account and no backend.
+  return SB.configured && SB.authChecked && !SB.authUser && !SB.demo;
 }
 function loginHtml() {
   const err = SB.authError ? '<div class="error" role="alert">' + esc(SB.authError) + '</div>' : '';
@@ -262,6 +271,13 @@ function loginHtml() {
 }
 /* Entry screen for anyone not signed in: join a live game with its
    code (no account needed, view-only) or sign in as a coach. */
+function demoHtml() {
+  // Demo / test mode: clearly separate from the real paths — it is
+  // not a back door into real data. Sample team only, in-memory only,
+  // nothing is saved, nothing syncs.
+  return '<div class="card"><h3>Try a demo</h3><p class="muted">Explore the app with the sample team — no sign-in, nothing is saved, nothing syncs. Leaving the demo discards it.</p>'
+    + '<div class="row"><button class="primary" data-enter-demo>Try a demo — sample team</button></div></div>';
+}
 function entryHtml() {
   // Errors are shown here too: the login-gate early return in
   // render() skips the error line, so a wrong view code (or a
@@ -272,6 +288,7 @@ function entryHtml() {
     + '<div class="card"><h3>Join a shared view</h3><p class="muted">Enter the 4-letter view code from the coach\u2019s shared link. No account needed — you watch live and see history, view-only.</p>'
     + '<div class="row"><input type="text" id="join-code" placeholder="View code" maxlength="4" autocapitalize="characters" autocomplete="off" style="width:110px;text-transform:uppercase"><button class="primary" data-join-viewer>Watch</button></div></div>'
     + loginHtml()
+    + demoHtml()
     + '</section>';
 }
 async function signInWithPassword(email, password) {
@@ -294,6 +311,32 @@ async function signInWithPassword(email, password) {
     return false;
   }
 }
+/* ---------- Demo / test mode (no sign-in, sample roster) ---------- */
+/* Enter demo mode from the entry screen: the fictional sample roster
+   only, everything in-memory. No Supabase calls of any kind — the
+   app never had a session, and every backend-touching function
+   returns early while SB.demo is set (see the guards below), so a
+   demo game can never create a live_games row, write history, or
+   touch the real roster. A demo game also has no live id and no
+   role, so the sync paths (scheduleLiveSync / doLiveSync /
+   finishLiveGame) are no-ops. Leaving demo discards the session. */
+function enterDemo(){
+  SB.demo = true;
+  SB.viewerMode = false;
+  S.showSignin = false;
+  resetLiveSession();
+  S = freshState(); // sample roster, empty history, default settings
+  S.screen = 'setup'; S.setupTab = 'lineup';
+  render();
+}
+function exitDemo(){
+  SB.demo = false;
+  resetLiveSession();
+  S = freshState();
+  S.screen = 'setup';
+  render(); // the login gate shows again (no user, no demo)
+}
+
 async function signOutUser() {
   try { if (SB.client) await SB.client.auth.signOut(); } catch (e) { /* fall through to local clear */ }
   SB.authUser = null; SB.authError = '';
@@ -329,6 +372,7 @@ function rosterSourceLabel() {
   return '';
 }
 async function loadRoster() {
+  if (SB.demo) return false; // demo uses the sample roster, never the backend
   SB.rosterLoaded = false; SB.rosterError = ''; SB.rosterRowId = null;
   SB.rosterFromBackend = false; SB.rosterFromLive = false;
   if (!SB.configured || !SB.client || !SB.authUser) return false;
@@ -366,6 +410,7 @@ async function loadRoster() {
   }
 }
 async function saveRosterToBackend() {
+  if (SB.demo) return false; // demo roster is never saved
   if (!SB.configured || !SB.client || !SB.authUser) return false;
   if (SB.role === 'viewer' && SB.liveId) return false; // view-only never writes
   const payload = {
@@ -481,7 +526,7 @@ function internalGameFromRow(row) {
   };
 }
 async function loadHistory() {
-  if (!SB.configured) return;
+  if (!SB.configured || SB.demo) return; // demo history is this session only
   try {
     const { data, error } = await SB.client.from('game_history')
       .select('*').order('game_date', { ascending: false }).order('created_at', { ascending: false });
@@ -512,7 +557,7 @@ async function loadHistory() {
   }
 }
 async function saveHistoryGame(game) {
-  if (!SB.configured) return;
+  if (!SB.configured || SB.demo) return; // demo games stay in-memory only
   try {
     const row = {
       game_date: new Date().toISOString().slice(0, 10),
@@ -534,7 +579,7 @@ async function saveHistoryGame(game) {
 async function discardHistoryGame(h) {
   if (!h) return;
   S.history = S.history.filter(x => x !== h);
-  if (SB.configured && h.backendId) {
+  if (SB.configured && h.backendId && !SB.demo) {
     try {
       const { error } = await SB.client.from('game_history').delete().eq('id', h.backendId);
       if (error) throw error;
@@ -545,7 +590,7 @@ async function discardHistoryGame(h) {
   }
 }
 async function syncHistoryGame(h) {
-  if (!SB.configured || !h || !h.backendId) return;
+  if (!SB.configured || !h || !h.backendId || SB.demo) return;
   try {
     // Recompute per-player goal counts from the (edited) goal list.
     h.players.forEach((p, i) => { p.goals = h.goals.filter(g => g.player === i).length; });
@@ -652,13 +697,13 @@ function livePhase() {
   return S.screen === 'halftime' ? 'halftime' : (S.screen === 'finished' ? 'finished' : 'live');
 }
 async function fetchLiveRow() {
-  if (!SB.configured || !SB.liveCode) return null;
+  if (!SB.configured || !SB.liveCode || SB.demo) return null;
   const { data, error } = await SB.client.from('live_games').select('*').eq('game_code', SB.liveCode).maybeSingle();
   if (error || !data) return null;
   return data;
 }
 function subscribeLive() {
-  if (!SB.configured || !SB.liveCode || !SB.client) return;
+  if (!SB.configured || !SB.liveCode || !SB.client || SB.demo) return;
   try {
     if (SB.channel) { SB.client.removeChannel(SB.channel); SB.channel = null; }
     SB.channel = SB.client.channel('live-' + SB.liveCode)
@@ -696,6 +741,7 @@ function handleRemoteLive(row) {
   render();
 }
 async function startLiveDriver() {
+  if (SB.demo) return; // demo games are local only — no live_games row, ever
   if (!SB.configured) {
     SB.backendError = 'Live game could not be started — try again.';
     return;
@@ -721,6 +767,7 @@ async function joinLiveGame(code, opts) {
   // (Robin's call, Nov 2026): whoever started the game, however many
   // coach sessions are open, they all edit the same live game, last
   // write wins with the version check in doLiveSync.
+  if (SB.demo) { S.error = 'Demo mode — exit the demo to join a real live game.'; if (S.screen === 'loading') S.screen = 'setup'; render(); return false; }
   if (!SB.configured) { S.error = 'Live games need Supabase — try again later.'; render(); return false; }
   if (!SB.authUser) { S.error = 'Sign in as a coach to join a live game with its game code.'; render(); return false; }
   try {
@@ -770,6 +817,7 @@ async function joinViewerCode(code) {
   // after the call, so the error is painted once and never wiped by
   // a second render in the same flow (a double render used to eat
   // the message — the entry screen came back with no explanation).
+  if (SB.demo) { S.error = 'Demo mode — exit the demo to watch a shared view.'; if (S.screen === 'loading') S.screen = 'setup'; return false; }
   if (!SB.configured) { S.error = 'Viewing needs Supabase — try again later.'; if (S.screen === 'loading') S.screen = 'setup'; return false; }
   code = (code || '').trim().toUpperCase();
   if (!code) { S.error = 'Enter the 4-letter view code first.'; if (S.screen === 'loading') S.screen = 'setup'; return false; }
@@ -862,7 +910,7 @@ function startViewerPoll() {
   SB.viewerTimer = setInterval(() => { refreshViewer(); }, 3000);
 }
 async function refreshViewer() {
-  if (!SB.viewerMode || SB.authUser || !SB.client) return;
+  if (!SB.viewerMode || SB.authUser || !SB.client || SB.demo) return;
   try {
     const { data, error } = await SB.client.rpc('viewer_access', { p_code: SB.viewerJoinedCode });
     if (error) throw error;
@@ -1007,7 +1055,7 @@ function viewerShareHtml(){
     +'</div>';
 }
 async function loadViewerCode(){
-  if (!SB.configured || !SB.authUser) return;
+  if (!SB.configured || !SB.authUser || SB.demo) return;
   SB.viewerCodeLoading = true;
   await fetchViewerCode();
   SB.viewerCodeLoading = false;
@@ -1028,7 +1076,7 @@ async function createViewerCode(){
   throw new Error('no code generated');
 }
 async function generateViewerCode(){
-  if (!SB.configured || !SB.authUser) return;
+  if (!SB.configured || !SB.authUser || SB.demo) return;
   try {
     const code = await createViewerCode();
     await copyText(viewerLinkUrl(code));
@@ -1039,7 +1087,7 @@ async function generateViewerCode(){
 /* Quiet load of the active view code (no render): Settings uses
    loadViewerCode, which renders; deep links just need the value. */
 async function fetchViewerCode(){
-  if (!SB.configured || !SB.authUser) return '';
+  if (!SB.configured || !SB.authUser || SB.demo) return '';
   try {
     const { data, error } = await SB.client.from('viewer_codes').select('code').eq('active', true).maybeSingle();
     if (error) throw error;
@@ -1053,6 +1101,7 @@ async function fetchViewerCode(){
    spot so the URL is always shareable. Never throws — without a
    code the URL just has no view param (offline / unreachable). */
 async function ensureViewerCode(){
+  if (SB.demo) return ''; // demo has no shareable URL
   if (SB.viewerCode) return SB.viewerCode;
   if (!SB.configured || !SB.authUser) return '';
   if (SB.viewerCodeLoading) {
@@ -1086,7 +1135,7 @@ async function copyText(text){
    renders first, and the note appears only when a game is actually
    active. The game the coach is already in never shows a note. */
 async function loadActiveGames(){
-  if (!SB.configured || !SB.authUser || SB.activeGamesLoading) return;
+  if (!SB.configured || !SB.authUser || SB.activeGamesLoading || SB.demo) return;
   SB.activeGamesLoading = true;
   try {
     const { data, error } = await SB.client.from('live_games')
@@ -1127,7 +1176,7 @@ function activeGamesHtml(){
 }
 async function joinActiveGame(row){
   // No code needed: the coach is signed in, so any coach can drive.
-  if (!SB.configured || !SB.authUser || !row) return false;
+  if (!SB.configured || !SB.authUser || !row || SB.demo) return false;
   SB.liveId = row.id; SB.liveCode = row.game_code; SB.liveVersion = row.version;
   SB.role = 'driver'; SB.offline = false; SB.viewerMode = false;
   applyLiveState(row.state || {});
@@ -1236,12 +1285,12 @@ async function routeFromUrl(){
   return false;
 }
 function scheduleLiveSync(immediate) {
-  if (SB.role !== 'driver' || !SB.liveId || !SB.configured) return;
+  if (SB.role !== 'driver' || !SB.liveId || !SB.configured || SB.demo) return;
   if (SB.syncTimer) clearTimeout(SB.syncTimer);
   SB.syncTimer = setTimeout(() => { doLiveSync(); }, immediate ? 0 : 1200);
 }
 async function doLiveSync() {
-  if (SB.role !== 'driver' || !SB.liveId || !SB.configured) return;
+  if (SB.role !== 'driver' || !SB.liveId || !SB.configured || SB.demo) return;
   const nextVersion = SB.liveVersion + 1;
   try {
     const { data, error } = await SB.client.from('live_games').update({
@@ -1290,7 +1339,7 @@ async function doLiveSync() {
   }
 }
 async function finishLiveGame() {
-  if (SB.role !== 'driver' || !SB.liveId || !SB.configured) return;
+  if (SB.role !== 'driver' || !SB.liveId || !SB.configured || SB.demo) return;
   try {
     const nextVersion = SB.liveVersion + 1;
     await SB.client.from('live_games').update({
@@ -1312,7 +1361,7 @@ async function finishLiveGame() {
    policy (schema.sql / add-live-delete.sql) is authenticated-only,
    so a viewer cannot call it either. */
 async function shutdownLiveGame(gameId){
-  if (!SB.authUser) return;
+  if (!SB.authUser || SB.demo) return;
   // The landing screen passes the game's id. (An open game would
   // pass its own id too — the same path shuts down whichever game
   // the coach picked, without opening it first.)
@@ -1952,7 +2001,7 @@ function seasonCsv(){
 }
 function historyHtml(){
   let status = '';
-  if (SB.configured) {
+  if (SB.configured && !SB.demo) {
     if (SB.historyError) status = '<p class="muted">' + esc(SB.historyError) + '</p>';
     else if (!SB.historyLoaded) status = '<p class="muted">Loading history\u2026</p>';
   }
@@ -2256,6 +2305,9 @@ function render(){
   // screen. Signed-in coaches never see this banner — any coach can
   // drive, no Take over.
   if(SB.viewerMode && !SB.authUser) html+='<div class="banner banner-viewer"><span>View-only — shared view.</span><button class="banner-link" data-share-viewer>Share this view</button><button class="banner-link" data-goto-signin>Sign in as a coach</button></div>';
+  // Demo mode: the same compact one-line treatment — sample team,
+  // nothing saved — on every demo screen, with the way out.
+  if(SB.demo) html+='<div class="banner banner-demo"><span>Demo — sample team &middot; nothing is saved.</span><button class="banner-link" data-exit-demo>Exit demo</button></div>';
   // Driver: sync the live snapshot (debounced) after any render that
   // follows an action. Remote applies set SB.applyingRemote and skip;
   // a render right after applying a remote update skips the sync once
@@ -2303,8 +2355,11 @@ function setupHtml(){
     // is filled — all 7, or the 6 remaining in short mode. The hint
     // names the empty spots so the coach knows what is missing.
     const emptyReview = emptySpotsLabel();
-    body='<div class="card"><h3>Join a live game</h3><p class="muted">Enter the 4-letter game code from the driver\u2019s phone.</p>'
-      +'<div class="row"><input type="text" id="join-code" placeholder="Game code" maxlength="4" autocapitalize="characters" autocomplete="off" style="width:110px;text-transform:uppercase"><button class="primary" data-join-live>Join live game</button></div></div>'
+    // Demo has no real games to join: the card is hidden, not just
+    // disabled — joining a live game needs a coach sign-in.
+    const joinCard = SB.demo ? '' : '<div class="card"><h3>Join a live game</h3><p class="muted">Enter the 4-letter game code from the driver\u2019s phone.</p>'
+      +'<div class="row"><input type="text" id="join-code" placeholder="Game code" maxlength="4" autocapitalize="characters" autocomplete="off" style="width:110px;text-transform:uppercase"><button class="primary" data-join-live>Join live game</button></div></div>';
+    body=joinCard
       +'<div class="card"><div class="row spread"><span><strong>Preferred lineup</strong> <span class="muted">&middot; '+(S.preferredLineup?'Ready':'Not set')+'</span></span><button class="small" data-manage-preferred>Manage</button></div>'
       +(lastBtn?'<div class="row" style="margin-top:8px">'+lastBtn+'</div>':'')
       +'</div>'
@@ -2536,7 +2591,8 @@ async function finishGame(){
   // Durable record first: history insert, then mark the live row finished.
   await saveHistoryGame(game);
   await finishLiveGame();
-  if(game.backendId) S.saveNote='Game saved to history.';
+  if(SB.demo) S.saveNote='Demo game — nothing is saved.';
+  else if(game.backendId) S.saveNote='Game saved to history.';
   else if(SB.configured) S.saveNote='Game saved on this device only — download the CSV as a backup.';
   render();
 }
@@ -2601,7 +2657,7 @@ function startSecondHalf(){
 
 /* ---------- Events (delegation) ---------- */
 document.addEventListener('click', async (e)=>{
-  const t=e.target.closest('[data-spot],[data-bench],[data-tab],[data-viewer-tab],[data-pick],[data-scorer],[data-step],[data-close],[data-clear-spot],[data-save-note],[data-pref],[data-remove-pos],[data-goal-minus],[data-goal-plus],[data-goal-del],[data-tired],[data-note],[data-prefs],[data-rename],[data-save-rename],[data-add-player],[data-save-add-player],[data-remove-player],[data-save-roster],[data-attend],[data-unqueue],[data-csv],[data-editgoals],[data-auto],[data-refresh],[data-review],[data-back-setup],[data-start-game],[data-pause],[data-plus2],[data-halftime],[data-end],[data-shutdown-game],[data-undo],[data-apply],[data-clear-queue],[data-suggest],[data-edit-lineup],[data-play-short],[data-full-strength],[data-edit-goals],[data-do-swap],[data-plan-refresh],[data-plan-use],[data-start-second],[data-snap-clock],[data-back-live],[data-goto-signin],[data-join-viewer],[data-join-viewer-game],[data-share-viewer],[data-join-active],[data-gen-viewer-link],[data-copy-viewer-link],[data-leave-live],[data-new-game],[data-csv-last],[data-editgoals-last],[data-confirm-yes],[data-last-lineup],[data-use-preferred],[data-save-preferred],[data-score],[data-signin],[data-signout],[data-close-history],[data-discard-game],[data-leaving],[data-arrived],[data-setup-tab],[data-details],[data-season-csv],[data-all-history-csv],[data-export-roster],[data-clear-lineup],[data-clear-preferred],[data-manage-preferred],[data-more],[data-pref-inline],[data-halftime-prefs],[data-join-live]');
+  const t=e.target.closest('[data-spot],[data-bench],[data-tab],[data-viewer-tab],[data-pick],[data-scorer],[data-step],[data-close],[data-clear-spot],[data-save-note],[data-pref],[data-remove-pos],[data-goal-minus],[data-goal-plus],[data-goal-del],[data-tired],[data-note],[data-prefs],[data-rename],[data-save-rename],[data-add-player],[data-save-add-player],[data-remove-player],[data-save-roster],[data-attend],[data-unqueue],[data-csv],[data-editgoals],[data-auto],[data-refresh],[data-review],[data-back-setup],[data-start-game],[data-pause],[data-plus2],[data-halftime],[data-end],[data-shutdown-game],[data-undo],[data-apply],[data-clear-queue],[data-suggest],[data-edit-lineup],[data-play-short],[data-full-strength],[data-edit-goals],[data-do-swap],[data-plan-refresh],[data-plan-use],[data-start-second],[data-snap-clock],[data-back-live],[data-goto-signin],[data-join-viewer],[data-join-viewer-game],[data-share-viewer],[data-join-active],[data-gen-viewer-link],[data-copy-viewer-link],[data-leave-live],[data-new-game],[data-csv-last],[data-editgoals-last],[data-confirm-yes],[data-last-lineup],[data-use-preferred],[data-save-preferred],[data-score],[data-signin],[data-signout],[data-close-history],[data-discard-game],[data-leaving],[data-arrived],[data-setup-tab],[data-details],[data-season-csv],[data-all-history-csv],[data-export-roster],[data-clear-lineup],[data-clear-preferred],[data-manage-preferred],[data-more],[data-pref-inline],[data-halftime-prefs],[data-join-live],[data-enter-demo],[data-exit-demo]');
   if(!t) return;
   const d=t.dataset;
 
@@ -2616,6 +2672,9 @@ document.addEventListener('click', async (e)=>{
     if(ok){ await enterApp(); }
     return;
   }
+  // Demo mode: allowed on the entry screen (and its banner) only.
+  if(d.enterDemo!==undefined){ enterDemo(); return; }
+  if(d.exitDemo!==undefined){ exitDemo(); return; }
 
   // Anonymous watchers are strictly view-only: block every edit
   // action. Allowed: switching tabs, closing modals, viewing history
@@ -2834,8 +2893,9 @@ document.addEventListener('click', async (e)=>{
     openStints(); // the starting seven's stints begin at kickoff
     render();
     // Driver: create the live row (fire-and-forget; the game works
-    // in-memory even if Supabase is unreachable).
-    startLiveDriver();
+    // in-memory even if Supabase is unreachable). Demo games stay
+    // local: no live row, no sync, no shareable code.
+    if (!SB.demo) startLiveDriver();
     return;
   }
   if(d.pause!==undefined){ if(S.running) pauseClock(); else resumeClock(); render(); return; }
